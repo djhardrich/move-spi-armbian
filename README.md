@@ -201,3 +201,9 @@ Once the new image boots:
    display-pull handshake is stuck - check `/proc/ableton/ablspi/0.0/irq_count`
    continues to climb. If it's frozen, the GPIO mapping / pin routing
    on the carrier differs from the CM4 layout.
+   
+## AI Assistance Disclaimer
+This was developed with AI assistance, including Claude, Codex, and other AI assistants.
+
+All architecture, implementation, and release decisions are reviewed by human maintainers.
+AI-assisted content may still contain errors, so please validate functionality, security, and license compatibility before production use.
