@@ -1,0 +1,23 @@
+[Unit]
+Description=Replay Ableton XMOS handshake so UI events arrive as plain MIDI
+Documentation=https://github.com/local/move-bringup
+DefaultDependencies=no
+After=systemd-modules-load.service systemd-udev-settle.service local-fs.target
+Wants=systemd-udev-settle.service
+Before=move-launcher.service shutdown.target
+Conflicts=shutdown.target
+ConditionPathExists=/dev/ablspi0.0
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/usr/sbin/move-xmos-init
+StandardOutput=journal
+StandardError=journal
+
+# Failure is non-fatal: ablspi will still expose /dev/ablspi0.0 and stock
+# MoveLauncher does its own init. Mark as success so dependent units run.
+SuccessExitStatus=0 1
+
+[Install]
+WantedBy=multi-user.target

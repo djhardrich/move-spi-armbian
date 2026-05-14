@@ -1,0 +1,17 @@
+Stage locally-built .debs here. The customize-image.sh hook installs
+every *.deb in this directory into the assembled rootfs via apt.
+
+Expected files after running `dpkg-buildpackage -us -uc -b` in
+../move-bringup/:
+
+    ablspi-dkms_1.0.0-1_all.deb
+    move-bringup_1.0.0-1_arm64.deb
+
+Also stage the kernel-config fragment under userpatches/ so the
+move-kernel-config extension can find it:
+
+    cp ../../kernel-config/move.fragment.config userpatches/
+
+And stage the DTS sources so customize-image.sh can compile them:
+
+    cp ../../dts/ablspi-move-cm*.dts userpatches/extras/dts/

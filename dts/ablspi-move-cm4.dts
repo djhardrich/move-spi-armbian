@@ -1,0 +1,174 @@
+// SPDX-License-Identifier: GPL-2.0-or-later
+/*
+ * ablspi-move-cm4.dts - Device-tree overlay porting the Ableton Move's
+ * custom bindings to a stock Raspberry Pi CM4 (BCM2711) running upstream
+ * Debian arm64 + the standard rpi-6.x kernel.
+ *
+ * This is the CM4 sibling of ablspi-move-cm5.dts. It re-creates exactly
+ * what the original Ableton-supplied ablspi.dtbo did on the CM4 image,
+ * but in a form that drops in next to the upstream RPi overlay set:
+ *
+ *   1. &spi0 chip-select 0 becomes the XMOS link: compatible "ablspi",
+ *      irq-gpio = 3, max 125 MHz (driver clocks at 20 MHz by default).
+ *   2. &spi0 chip-select 1 disabled.
+ *   3. SPI0 pinctrl gets an extra pin group covering GPIOs 40-43, which
+ *      the Move carrier wires to additional XMOS handshake/strobe lines.
+ *      Mirrors the legacy `spi2_pins` group used by the original overlay.
+ *   4. PCF85063 RTC on &i2c1 address 0x51.
+ *   5. dwc2 USB OTG in peripheral mode for the NCM gadget.
+ *
+ * Build:   dtc -@ -W no-gpios_property -I dts -O dtb \
+ *              -o ablspi-move-cm4.dtbo ablspi-move-cm4.dts
+ * Install: copy to /boot/firmware/overlays/ then add
+ *              dtoverlay=ablspi-move-cm4
+ *          to /boot/firmware/config.txt. Overrides:
+ *              dtoverlay=ablspi-move-cm4,ablspi_irq_gpio=3
+ *              dtoverlay=ablspi-move-cm4,ablspi_max_hz=20000000
+ *              dtoverlay=ablspi-move-cm4,rtc_addr=0x51
+ */
+
+/dts-v1/;
+/plugin/;
+
+/ {
+	compatible = "brcm,bcm2711";
+
+	fragment@0 {
+		target-path = "/";
+		__overlay__ {
+			compatible = "ableton,move",
+				     "raspberrypi,4-compute-module",
+				     "brcm,bcm2711";
+			model = "Ableton Move (CM4, Debian)";
+		};
+	};
+
+	/*
+	 * Add the XMOS-handshake pin group to the BCM2711 gpio controller.
+	 * Pins 40-43 are repurposed by the Move carrier; pull is disabled so
+	 * the XMOS-side push-pull drivers own the line state.
+	 */
+	fragment@1 {
+		target = <&gpio>;
+		__overlay__ {
+			move_xmos_handshake_pins: move_xmos_handshake_pins {
+				brcm,pins = <40 41 42 43>;
+				brcm,function = <4>;	/* ALT0, matches stock spi2 pinmux */
+				brcm,pull = <0>;
+			};
+		};
+	};
+
+	/*
+	 * SPI0: ablspi on CS0, nothing on CS1. We delete the upstream spidev
+	 * children so our binding wins regardless of overlay load order, and
+	 * extend pinctrl-0 with the handshake group above.
+	 */
+	fragment@2 {
+		target = <&spi0>;
+		__overlay__ {
+			#address-cells = <1>;
+			#size-cells = <0>;
+			status = "okay";
+			pinctrl-names = "default";
+			pinctrl-0 = <&spi0_pins>, <&spi0_cs_pins>,
+				    <&move_xmos_handshake_pins>;
+
+			/delete-node/ spidev@0;
+			/delete-node/ spidev@1;
+
+			ablspi: ablspi@0 {
+				compatible = "ablspi";
+				reg = <0>;
+				spi-max-frequency = <125000000>;
+
+				/*
+				 * Modern descriptor-based GPIO binding via
+				 * phandle. Driver uses devm_gpiod_get(dev,
+				 * "irq", GPIOD_IN) which resolves through
+				 * this property regardless of the gpiochip
+				 * base offset (Armbian 6.18 bases at 512;
+				 * legacy gpio_request(3,...) fails there).
+				 */
+				irq-gpios = <&gpio 3 0>;
+			};
+
+			ablspi_cs1: spidev@1 {
+				compatible = "spidev";
+				reg = <1>;
+				spi-max-frequency = <125000000>;
+				status = "disabled";
+			};
+		};
+	};
+
+	/*
+	 * PCF85063 RTC on i2c0 routed to GPIO 44 (SDA) / GPIO 45 (SCL) via
+	 * the stock upstream `i2c0_gpio44` pinctrl group (ALT1 function).
+	 * This is the same pinmux Ableton uses on the production Move
+	 * (verified: /sys/.../i2c@7e205000/pinctrl-0 phandle resolves to
+	 * &i2c0_gpio44 with brcm,pins=<44 45> brcm,function=<5> on hardware).
+	 *
+	 * Critically, GPIO 44/45 are entirely separate from:
+	 *   - GPIO 2/3 (default I2C1 pinmux - GPIO 3 is our ablspi IRQ)
+	 *   - GPIO 7-11 (SPI0)
+	 *   - GPIO 40-43 (XMOS handshake)
+	 * so there is no driver contention.
+	 *
+	 * We also force the i2c0mux off; on stock RPi DTBs it owns BSC0 and
+	 * lets userspace switch the bus between camera/display I2C paths,
+	 * which we don't want when the RTC is sitting on it.
+	 */
+	fragment@4 {
+		target = <&i2c0mux>;
+		__overlay__ {
+			status = "disabled";
+		};
+	};
+
+	fragment@5 {
+		/*
+		 * Target &i2c0if, NOT &i2c0. In Armbian's BCM2711 base DTB:
+		 *   i2c0if  -> /soc/i2c@7e205000  (the actual BSC0 controller)
+		 *   i2c0    -> /soc/i2c0mux/i2c@0 (a mux child node, wrong target)
+		 * Using &i2c0 caused the overlay fixup to land on the mux child,
+		 * which has no status property to flip and silently failed to
+		 * apply the RTC subnode.
+		 */
+		target = <&i2c0if>;
+		__overlay__ {
+			#address-cells = <1>;
+			#size-cells = <0>;
+			status = "okay";
+			pinctrl-names = "default";
+			pinctrl-0 = <&i2c0_gpio44>;
+			clock-frequency = <100000>;
+
+			move_rtc: rtc@51 {
+				compatible = "nxp,pcf85063";
+				reg = <0x51>;
+				status = "okay";
+			};
+		};
+	};
+
+	/*
+	 * dwc2 OTG: NOT configured here. Armbian's BCM2711 base DTB does
+	 * not expose a `&dwc2` label - the USB controller has a single
+	 * `&usb` label and the dwc2 vs xhci personality is selected via
+	 * Pi firmware's runtime mechanism: `dtoverlay=dwc2,dr_mode=otg`
+	 * in /boot/firmware/config.txt. Our move.csc's zzz_move_finalise
+	 * hook adds that line for [cm4] sections AND strips the family's
+	 * `otg_mode=1` (which would force xhci/host-only mode).
+	 *
+	 * Attempting `target = <&dwc2>` here previously caused the entire
+	 * overlay to silently fail-to-apply because the firmware couldn't
+	 * resolve the missing label, dropping our ablspi node along with it.
+	 */
+
+	__overrides__ {
+		ablspi_irq_gpio = <&ablspi>,"irq-gpio:0";
+		ablspi_max_hz   = <&ablspi>,"spi-max-frequency:0";
+		rtc_addr        = <&move_rtc>,"reg:0";
+	};
+};

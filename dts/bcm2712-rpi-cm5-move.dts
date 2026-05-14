@@ -1,0 +1,82 @@
+// SPDX-License-Identifier: GPL-2.0-or-later
+/*
+ * bcm2712-rpi-cm5-move.dts - Standalone, fully-merged device tree for the
+ * Ableton Move running on a Raspberry Pi Compute Module 5 carrier.
+ *
+ * Drop this file into the rpi-6.6.y kernel source at
+ *     arch/arm64/boot/dts/broadcom/bcm2712-rpi-cm5-move.dts
+ * and add the same filename (without .dts) to
+ *     arch/arm64/boot/dts/broadcom/Makefile
+ * under the `dtb-$(CONFIG_ARCH_BCM2835) += ...` list, alongside the other
+ * bcm2712-* entries.
+ *
+ * Build:
+ *     make -C linux ARCH=arm64 CROSS_COMPILE=aarch64-linux-gnu- \
+ *          broadcom/bcm2712-rpi-cm5-move.dtb
+ *
+ * Install:
+ *     cp arch/arm64/boot/dts/broadcom/bcm2712-rpi-cm5-move.dtb \
+ *        /boot/firmware/
+ * and reference it from /boot/firmware/config.txt:
+ *     device_tree=bcm2712-rpi-cm5-move.dtb
+ *
+ * Move-specific additions (mirrored exactly from the CM4 image):
+ *   - &spi0/ablspi@0 (compatible "ablspi", irq-gpio = 3) for the XMOS link.
+ *   - &spi0/spidev@1 disabled.
+ *   - PCF85063 RTC on &i2c1 @ 0x51.
+ *   - &dwc2 in peripheral mode for the NCM USB-Ethernet gadget.
+ *
+ * Everything else - SoC topology, clocks, GIC, GPIO, PCIe, USB controllers,
+ * MMC, DMA, thermals - is inherited from the upstream cm5io base.
+ */
+
+/dts-v1/;
+
+#include "bcm2712-rpi-cm5-cm5io.dts"
+
+/ {
+	compatible = "ableton,move",
+		     "raspberrypi,5-compute-module",
+		     "brcm,bcm2712";
+	model = "Ableton Move (CM5)";
+};
+
+&spi0 {
+	status = "okay";
+
+	/delete-node/ spidev@0;
+	/delete-node/ spidev@1;
+
+	ablspi: ablspi@0 {
+		compatible = "ablspi";
+		reg = <0>;
+		spi-max-frequency = <125000000>;
+
+		/*
+		 * Legacy bare-integer GPIO binding consumed by the ablspi
+		 * kernel module via of_property_read_u32. dtc will warn that
+		 * cell 0 is not a phandle reference - that's intentional ABI
+		 * compatibility with the CM4 driver.
+		 */
+		irq-gpio = <3>;
+	};
+};
+
+&i2c1 {
+	status = "okay";
+	clock-frequency = <100000>;
+
+	move_rtc: rtc@51 {
+		compatible = "nxp,pcf85063";
+		reg = <0x51>;
+		status = "okay";
+	};
+};
+
+&dwc2 {
+	status = "okay";
+	dr_mode = "peripheral";
+	g-rx-fifo-size = <512>;
+	g-np-tx-fifo-size = <512>;
+	g-tx-fifo-size = <512 512 512 512>;
+};

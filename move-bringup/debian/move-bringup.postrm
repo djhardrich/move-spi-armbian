@@ -1,0 +1,31 @@
+#!/bin/sh
+# postrm for move-bringup
+set -e
+
+case "$1" in
+    purge)
+        # We deliberately do NOT remove the ableton user or ablspi group
+        # on purge: they own files on /data/UserData. Wiping them would
+        # orphan user content. Document the manual cleanup for an admin
+        # who really wants to start fresh.
+        cat >&2 <<'EOF'
+move-bringup: purge leaves the ableton user and ablspi group in place
+because they own files on /data. To remove them manually after backing
+up or chowning /data:
+    deluser ableton
+    delgroup ablspi
+EOF
+        if [ -d /run/systemd/system ]; then
+            systemctl daemon-reload || true
+        fi
+        ;;
+    remove|upgrade|failed-upgrade|abort-install|abort-upgrade|disappear)
+        ;;
+    *)
+        echo "postrm called with unknown argument \`$1'" >&2
+        exit 1
+        ;;
+esac
+
+#DEBHELPER#
+exit 0

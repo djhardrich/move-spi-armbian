@@ -1,0 +1,41 @@
+#!/bin/sh
+# Kernel postinst hook: rebuild + reinstall the Move DT overlays into
+# /boot/firmware/overlays/ after every kernel package update.
+#
+# On Armbian RPi images, the bcm2711 BSP's zzz-copy-new-files hook does
+# `cp -r /usr/lib/linux-image-<abi>/overlays /boot/firmware/` which
+# wipes any third-party .dtbo files we previously installed there. This
+# hook runs AFTER the BSP hook (filename starts with "z" but later than
+# "zzz-") and rebuilds our overlays from the .dts sources shipped in
+# /usr/share/move-bringup/overlays-src/.
+#
+# Idempotent: if neither .dts has changed since the existing .dtbo, dtc
+# will be re-run anyway (fast: ~100 ms each on aarch64), and the result
+# is identical.
+
+set -e
+
+OVERLAY_TARGET=/boot/firmware/overlays
+OVERLAY_SRC=/usr/share/move-bringup/overlays-src
+
+[ -d "$OVERLAY_SRC" ] || exit 0
+[ -d "$OVERLAY_TARGET" ] || mkdir -p "$OVERLAY_TARGET"
+
+# dtc is a Recommends:, not a hard Depends:, so we tolerate its absence.
+if ! command -v dtc >/dev/null 2>&1; then
+    echo "move-overlays: dtc not installed; skipping overlay rebuild" >&2
+    exit 0
+fi
+
+for src in "$OVERLAY_SRC"/ablspi-move-cm*.dts; do
+    [ -f "$src" ] || continue
+    base=$(basename "$src" .dts)
+    out="$OVERLAY_TARGET/${base}.dtbo"
+    if dtc -@ -q -W no-gpios_property -I dts -O dtb -o "$out" "$src" 2>/dev/null; then
+        echo "move-overlays: built $out"
+    else
+        echo "move-overlays: dtc failed for $src" >&2
+    fi
+done
+
+exit 0

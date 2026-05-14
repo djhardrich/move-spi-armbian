@@ -1,0 +1,137 @@
+move-bringup (1.0.6-1) unstable; urgency=medium
+
+  * /data and its subtree (CoreLibrary, Scratch, settings, UserData)
+    are now root:users mode 2775 (setgid, group-writable) instead of
+    root:root 0755. Stock AbletonOS has /data top-level as root:root
+    0755 — ableton can only write under /data/UserData/ there. We
+    loosen the top level so ableton (primary group `users`, gid 100)
+    can drop files directly under /data/, which is needed for
+    development, third-party userspace (vimana2r, schwung), and
+    custom scripts the ableton user runs from its home. setgid
+    ensures new files inherit group=users for symmetry. /data/log
+    stays 1777 (sticky, world-writable) for shared log access.
+
+ -- Move Port <move-port@localhost>  Wed, 13 May 2026 19:45:00 +0000
+
+move-bringup (1.0.5-1) unstable; urgency=medium
+
+  * move-launcher.service:
+    - Type=forking → Type=simple. MoveLauncher does NOT double-fork to
+      daemonize; with forking systemd would TimeoutStartSec it out
+      before it announced readiness and then SIGTERM the process.
+    - Group=ableton → Group=users. The `ableton` user's primary group
+      is `users` (gid 100) per the stock AbletonOS layout; there is no
+      `ableton` group, and the old setting crashed the unit with
+      status=216/GROUP before ExecStart could even fire.
+    - SupplementaryGroups expanded to ablspi/audio/realtime/dialout/
+      plugdev/video/render to mirror the stock runtime environment.
+    - After/Wants now also includes swupdateprog-stub.service.
+  * Added swupdateprog-stub: small UNIX-socket stub at
+    /tmp/swupdateprog that satisfies MoveControlModeHandler's
+    libswupdate `progress_ipc_connect()` retry-loop. Without this,
+    MoveControlModeHandler spin-retries connect() forever and never
+    opens /dev/ablspi0.0, leaving MoveLauncher stuck on the boot
+    splash. The Debian `swupdate` package itself is compiled with
+    -DCONFIG_SIGNED_IMAGES and refuses to start without a public key
+    file — running the real daemon was simpler to bypass than to
+    configure. Ships as /usr/local/sbin/swupdateprog-stub.py and an
+    enabled systemd unit.
+  * postinst: enable + start swupdateprog-stub.service.
+  * BUILD.md: document the ConnMan/net.connman WiFi-status gap (stock
+    uses ConnMan; we use NetworkManager; networking works fine but the
+    on-device WiFi icon stays "disconnected" until we add an NM-state
+    → ConnMan-D-Bus bridge or co-install ConnMan).
+
+ -- Move Port <move-port@localhost>  Wed, 13 May 2026 19:20:00 +0000
+
+move-bringup (1.0.4-1) unstable; urgency=medium
+
+  * /data is now a real mount point. Ships data.mount, a systemd .mount
+    unit that bind-mounts /var/lib/move-data over /data. MoveLauncher
+    gates a "No Data Partition" cosmetic display on
+    `findmnt --mountpoint /data` succeeding; with the bind-mount in
+    place the check passes and the message disappears. Avoids the SD
+    partition surgery the disabled move-firstboot-data.service would
+    have done — same outcome from MoveLauncher's perspective, no risk
+    of bricking the install on first boot.
+  * move-bringup.postinst now creates /var/lib/move-data and the
+    expected subtree (CoreLibrary, log, Scratch, settings, UserData
+    owned by ableton), enables + starts data.mount, and is safely
+    idempotent.
+  * move-launcher.service now Requires=data.mount so the launcher
+    won't start until /data is mounted.
+
+ -- Move Port <move-port@localhost>  Wed, 13 May 2026 18:25:00 +0000
+
+move-bringup (1.0.3-1) unstable; urgency=medium
+
+  * ablspi-dkms: CRITICAL FIX — the driver now sets SPI_MODE_3
+    (CPOL=1, CPHA=1) before spi_setup() in the probe path. The XMOS
+    firmware samples MOSI on the falling SCLK edge and drives MISO on
+    the rising edge; defaulting to SPI mode 0 produced "the bytes look
+    right but every status byte is junk" garbage in both directions
+    that even stock /opt/move/MoveLauncher could not decode ("Couldn't
+    decode USB MIDI message {2, 14, 128, 128}"). Confirmed via
+    objdump on the proprietary ablspi.ko:
+        ablspi_probe+0x434:  orr  w2, w2, #0x3      ; mode |= 3
+        ablspi_probe+0x438:  str  w2, [x20, #848]
+        ablspi_probe+0x43c:  bl   spi_setup
+    With this fix the XMOS replies cleanly to our SysEx batch and
+    move-xmos-init confirms mode=1 (standaloneMode) on first boot.
+  * move-xmos-init: poll the IN MIDI region on every frame during the
+    wait phase and accumulate the reassembled stream — the XMOS only
+    holds each reply slot for ~1 frame before overwriting it with the
+    next event, so the old "wait then scan once" approach missed the
+    burst of replies entirely.
+
+ -- Move Port <move-port@localhost>  Wed, 13 May 2026 17:45:00 +0000
+
+move-bringup (1.0.2-1) unstable; urgency=medium
+
+  * move-xmos-init: brought the replay byte sequence and ioctl pattern
+    into exact alignment with a fresh stock-Move boot capture
+    (capture-20260513-235610.bin, decoded with extended movesniff):
+      - drop the spurious SEND_MESSAGE_AND_WAIT(0) kickoff; stock uses
+        only SetSpeed + WAIT_AND_SEND_MESSAGE_WITH_SIZE, and our driver
+        rejects size=0 as -EINVAL anyway.
+      - prepend the 0xFF System Reset byte to the SysEx batch frame
+        (stock writes this as the first OUT byte at +0.674s; without it,
+        the XMOS appears to stay in raw-event mode instead of emitting
+        USB-MIDI).
+      - pack_midi() now recognises System Real-Time bytes (0xF8..0xFF)
+        and encodes them with USB-MIDI CIN 0xF.
+  * Ruled out the display region (OUT[80..255]) as the gating signal:
+    in the stock capture it is zero through the entire init handshake
+    and only starts seeing writes at +0.786s, well after mode=standalone
+    was reported.
+
+ -- Move Port <move-port@localhost>  Wed, 13 May 2026 17:05:00 +0000
+
+move-bringup (1.0.1-1) unstable; urgency=medium
+
+  * move-bringup: switched to architecture arm64 to ship the new
+    /usr/sbin/move-xmos-init binary alongside the existing config tree.
+  * Added move-xmos-init: a one-shot replay of the stock MoveLauncher
+    boot-time SysEx batch (Universal ID Request + cmd 0x42/0x25/0x3A/
+    0x1E/0x47/0x0D/0x37 + CC 0/126), reverse-engineered from a
+    movesniff capture of a stock Move boot. After this fires, the XMOS
+    streams pad/knob/button events as plain MIDI on cable 0 so
+    schwung-spi-based userspace (vimana2r, etc.) sees them. Stock
+    MoveLauncher continues to work because it does the same handshake.
+  * move-xmos-init.service: oneshot, runs after udev-settle and before
+    move-launcher; gated by ConditionPathExists=/dev/ablspi0.0.
+  * move-launcher.service: depends on move-xmos-init.service so the
+    handshake completes before MoveLauncher's own attempt.
+
+ -- Move Port <move-port@localhost>  Wed, 13 May 2026 07:40:00 +0000
+
+move-bringup (1.0.0-1) unstable; urgency=medium
+
+  * Initial Debian packaging of the Ableton Move bring-up tree.
+  * ablspi-dkms: clean-room kernel module for the CM <-> XMOS SPI link.
+  * move-bringup: ableton user/ablspi group, udev rule, DBus system policy
+    and services, modules-load.d entry, systemd units for MoveLauncher,
+    MoveWebService, the USB-Ethernet NCM gadget, and the XMOS power
+    sequencer; helpers for RT thread tuning.
+
+ -- Move Port <move-port@localhost>  Tue, 12 May 2026 09:00:00 +0000

@@ -1,0 +1,9 @@
+PACKAGE_NAME="ablspi"
+PACKAGE_VERSION="#MODULE_VERSION#"
+
+BUILT_MODULE_NAME[0]="ablspi"
+DEST_MODULE_LOCATION[0]="/extra"
+AUTOINSTALL="yes"
+
+MAKE[0]="make KDIR=/lib/modules/${kernelver}/build"
+CLEAN="make clean"

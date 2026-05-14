@@ -1,0 +1,60 @@
+# Pin Armbian's BCM2711 kernel / modules / base DTBs to whatever is
+# currently installed, so `apt upgrade` cannot replace our locally-built
+# PREEMPT_RT kernel with a stock non-RT one from the Armbian apt repo.
+#
+# Priority -1 makes the package uninstallable from any source via apt.
+# Combined with `apt-mark hold` (set by move-bringup.postinst) this
+# survives even `apt full-upgrade` / `apt dist-upgrade`.
+#
+# Covers:
+#   linux-image-current-bcm2711   kernel image + modules + DKMS hooks
+#   linux-headers-current-bcm2711 kernel headers (DKMS uses these)
+#   linux-dtb-current-bcm2711     base BCM2711/2712 device-tree blobs
+#
+# Same names with -edge / -legacy substituted are also covered via the
+# wildcards below; remove what you don't use.
+#
+# To deliberately upgrade the kernel later (e.g. after re-applying the
+# Move fragment to a newer kernel source):
+#     sudo apt-mark unhold linux-image-current-bcm2711 \
+#         linux-headers-current-bcm2711 linux-dtb-current-bcm2711
+#     sudo apt install <new-version>
+#     # rebuild ablspi via DKMS (automatic if headers present)
+#     sudo apt-mark hold linux-image-current-bcm2711 \
+#         linux-headers-current-bcm2711 linux-dtb-current-bcm2711
+
+Package: linux-image-current-bcm2711
+Pin: release *
+Pin-Priority: -1
+
+Package: linux-image-edge-bcm2711
+Pin: release *
+Pin-Priority: -1
+
+Package: linux-image-legacy-bcm2711
+Pin: release *
+Pin-Priority: -1
+
+Package: linux-headers-current-bcm2711
+Pin: release *
+Pin-Priority: -1
+
+Package: linux-headers-edge-bcm2711
+Pin: release *
+Pin-Priority: -1
+
+Package: linux-headers-legacy-bcm2711
+Pin: release *
+Pin-Priority: -1
+
+Package: linux-dtb-current-bcm2711
+Pin: release *
+Pin-Priority: -1
+
+Package: linux-dtb-edge-bcm2711
+Pin: release *
+Pin-Priority: -1
+
+Package: linux-dtb-legacy-bcm2711
+Pin: release *
+Pin-Priority: -1

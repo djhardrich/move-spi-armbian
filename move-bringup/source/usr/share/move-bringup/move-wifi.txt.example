@@ -1,0 +1,33 @@
+# Move headless WiFi setup
+# ─────────────────────────────────────────────────────────────────────
+# After flashing the Armbian Move image to your SD card, mount the
+# `bootfs` (or `boot`, depending on your OS) FAT partition on your
+# laptop. It's the small partition that contains config.txt and
+# cmdline.txt; it shows up as a regular USB drive on macOS, Windows,
+# and Linux - no special tools needed.
+#
+# Copy this file to that partition as `move-wifi.txt` (drop the
+# `.example`), edit the values below, then safely eject the card and
+# insert it into the Move.
+#
+# On first boot the Move will:
+#   1. Read this file
+#   2. Create a NetworkManager connection with autoconnect=true
+#   3. SHRED the source file from the SD (so the PSK doesn't sit on
+#      a FAT partition any laptop can mount)
+#   4. Connect to your WiFi - ssh in via `ssh root@move.local` once
+#      mDNS resolves (or check your router for the assigned IP)
+#
+# Default root password is "move". Change it on first login.
+
+SSID="MyWiFiNetwork"
+PSK="my-wifi-password"
+
+# ISO 3166-1 alpha-2 country code for the wireless regulatory domain.
+# Required for 5 GHz channels and power-limit compliance. Examples:
+# US, GB, DE, JP, AU.
+COUNTRY=US
+
+# Optional knobs (uncomment to override defaults):
+# CONNECTION_NAME=move-wifi          # NetworkManager connection name
+# HIDDEN=true                         # hidden SSID

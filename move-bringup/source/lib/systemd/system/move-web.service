@@ -1,0 +1,20 @@
+[Unit]
+Description=Ableton Move web service
+After=network.target dbus.service
+Requires=dbus.service
+ConditionPathExists=/opt/move/MoveWebService
+
+[Service]
+Type=forking
+User=ableton
+Group=ableton
+SupplementaryGroups=ablspi
+WorkingDirectory=/opt/move
+ExecStart=/usr/bin/start-stop-daemon --start --background \
+    --chuid ableton --exec /opt/move/MoveWebService
+ExecStop=/usr/bin/start-stop-daemon --stop --name MoveWebService --retry 5
+Restart=on-failure
+RestartSec=2s
+
+[Install]
+WantedBy=multi-user.target

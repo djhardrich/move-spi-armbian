@@ -1,0 +1,49 @@
+#!/bin/sh
+# prerm for move-bringup
+set -e
+
+case "$1" in
+    remove|deconfigure)
+        if [ -d /run/systemd/system ]; then
+            for u in move-launcher.service move-web.service \
+                     move-usb-gadget.service move-xmos-shutdown.service \
+                     move-firstboot-wifi.service; do
+                systemctl stop $u 2>/dev/null || true
+                systemctl disable $u 2>/dev/null || true
+            done
+        fi
+        # Release the kernel pins on removal so the user isn't stuck.
+        # On upgrade we keep them held - the new postinst will re-hold
+        # them anyway, but releasing+reholding briefly is racy.
+        if command -v apt-mark >/dev/null 2>&1; then
+            for pkg in linux-image-current-bcm2711 \
+                       linux-headers-current-bcm2711 \
+                       linux-dtb-current-bcm2711 \
+                       linux-image-edge-bcm2711 \
+                       linux-headers-edge-bcm2711 \
+                       linux-dtb-edge-bcm2711; do
+                if dpkg -l "$pkg" >/dev/null 2>&1; then
+                    apt-mark unhold "$pkg" >/dev/null 2>&1 || true
+                fi
+            done
+        fi
+        ;;
+    upgrade)
+        if [ -d /run/systemd/system ]; then
+            for u in move-launcher.service move-web.service \
+                     move-usb-gadget.service move-xmos-shutdown.service; do
+                systemctl stop $u 2>/dev/null || true
+            done
+        fi
+        # Keep kernel pins in place across our own package upgrade.
+        ;;
+    failed-upgrade)
+        ;;
+    *)
+        echo "prerm called with unknown argument \`$1'" >&2
+        exit 1
+        ;;
+esac
+
+#DEBHELPER#
+exit 0

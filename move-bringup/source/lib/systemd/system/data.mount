@@ -1,0 +1,16 @@
+[Unit]
+Description=Bind-mount /var/lib/move-data over /data so MoveLauncher passes its findmnt check
+Documentation=https://github.com/local/move-bringup
+DefaultDependencies=no
+Conflicts=umount.target
+After=local-fs-pre.target
+Before=local-fs.target umount.target
+
+[Mount]
+What=/var/lib/move-data
+Where=/data
+Type=none
+Options=bind
+
+[Install]
+WantedBy=local-fs.target

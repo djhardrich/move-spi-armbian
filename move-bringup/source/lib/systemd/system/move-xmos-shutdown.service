@@ -1,0 +1,19 @@
+[Unit]
+Description=Tell the XMOS to power Move down/cycle on shutdown
+DefaultDependencies=no
+Before=shutdown.target halt.target poweroff.target reboot.target
+ConditionPathExists=/opt/move/MoveXmosPower
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+# nothing to do at start; the work happens at stop time
+ExecStart=/bin/true
+# Match the stock image: xmos-power-cycle on reboot, xmos-power-off
+# on poweroff/halt. systemd shutdown.target is reached for all three,
+# so we dispatch based on which target was queued.
+ExecStop=/usr/lib/move-bringup/xmos-power-off.sh
+ExecStopPost=/usr/lib/move-bringup/xmos-power-cycle.sh
+
+[Install]
+WantedBy=shutdown.target

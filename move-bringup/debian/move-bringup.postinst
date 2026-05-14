@@ -1,0 +1,235 @@
+#!/bin/sh
+# postinst for move-bringup
+set -e
+
+ABLETON_UID=1000
+ABLETON_GID=100
+ABLSPI_GID=1000
+
+case "$1" in
+    configure)
+        # Create ablspi group at the same GID that the stock AbletonOS
+        # image uses, so /data permissions stay valid if the data
+        # partition is preserved across the migration. Fall back to a
+        # system-allocated GID if 1000 is already taken.
+        if ! getent group ablspi >/dev/null; then
+            if ! getent group $ABLSPI_GID >/dev/null; then
+                addgroup --system --gid $ABLSPI_GID ablspi
+            else
+                addgroup --system ablspi
+                echo "move-bringup: warning: GID $ABLSPI_GID taken; allocated dynamic GID for ablspi" >&2
+            fi
+        fi
+
+        # Create ableton user. Home is on /data per the stock layout;
+        # do not create the home dir (the data partition owns it).
+        if ! getent passwd ableton >/dev/null; then
+            if ! getent passwd $ABLETON_UID >/dev/null; then
+                adduser --system \
+                        --uid $ABLETON_UID \
+                        --gid $ABLETON_GID \
+                        --home /data/UserData \
+                        --no-create-home \
+                        --shell /bin/bash \
+                        --disabled-password \
+                        --gecos "Ableton Move runtime" \
+                        ableton
+            else
+                adduser --system \
+                        --gid $ABLETON_GID \
+                        --home /data/UserData \
+                        --no-create-home \
+                        --shell /bin/bash \
+                        --disabled-password \
+                        --gecos "Ableton Move runtime" \
+                        ableton
+                echo "move-bringup: warning: UID $ABLETON_UID taken; allocated dynamic UID for ableton" >&2
+            fi
+        fi
+
+        # Ensure the RT-related groups exist (creating if necessary)
+        # and that ableton is a member of each. Matches what
+        # customize-image.sh does on a fresh Armbian build, but also
+        # covers the case where this .deb is installed on a stock
+        # Debian image where the groups don't yet exist.
+        for g in audio realtime dialout plugdev video render; do
+            if ! getent group $g >/dev/null; then
+                addgroup --system $g >/dev/null 2>&1 || true
+            fi
+        done
+        for g in ablspi audio realtime dialout plugdev video render sudo; do
+            if getent group $g >/dev/null; then
+                adduser ableton $g >/dev/null 2>&1 || true
+            fi
+        done
+
+        # Set up the /data bind-mount. MoveLauncher gates a "No Data
+        # Partition" cosmetic display on `findmnt --mountpoint /data`
+        # succeeding; without a real mount entry it shows that message
+        # on the device's screen and skips some user-content features.
+        # We back /data with /var/lib/move-data on the rootfs and let
+        # systemd's data.mount unit bind-mount it; this is much lighter
+        # than carving an actual partition out of the SD on first boot
+        # and just-as-functional from MoveLauncher's perspective.
+        # /data top-level is root:users mode 2775 (setgid + group-write).
+        # Stock AbletonOS has /data as root:root 0755 — ableton can only
+        # write under /data/UserData/ there. We loosen the top level so
+        # ableton (primary group `users`, gid 100) can also drop files
+        # directly under /data/, which is needed for development /
+        # third-party userspace (vimana2r, schwung, custom shell
+        # scripts the ableton user runs from its home). setgid makes
+        # new files at the top level inherit group=users for symmetry.
+        # If you want strict stock parity, drop the chown/chmod here.
+        install -d -m 0775 /var/lib/move-data
+        chown root:users /var/lib/move-data
+        chmod 2775 /var/lib/move-data
+        install -d -m 0755 /data
+        # Seed the directories the Move userspace expects so the bind
+        # mount lands on a usable layout. UserData is owned by ableton
+        # per the stock image; the rest are root:root but with the
+        # same group-writable / setgid bits as the parent so any new
+        # content under them is also writable by ableton.
+        for d in CoreLibrary log Scratch settings; do
+            install -d -m 2775 /var/lib/move-data/$d
+            chown root:users /var/lib/move-data/$d 2>/dev/null || true
+        done
+        install -d -m 2775 -o ableton -g users /var/lib/move-data/UserData \
+            2>/dev/null || install -d -m 2775 /var/lib/move-data/UserData
+        chmod 1777 /var/lib/move-data/log 2>/dev/null || true
+        # Activate the mount immediately (without waiting for a reboot)
+        # so the postinst step that follows finds /data in its mounted
+        # state. The .mount unit is shipped enabled via the WantedBy=
+        # local-fs.target install symlink in dh_installsystemd.
+        if [ -d /run/systemd/system ]; then
+            systemctl daemon-reload >/dev/null 2>&1 || true
+            systemctl enable data.mount >/dev/null 2>&1 || true
+            # Don't unmount-then-remount if it's already mounted —
+            # MoveLauncher may be holding fds open.
+            if ! findmnt --mountpoint /data >/dev/null 2>&1; then
+                systemctl start data.mount >/dev/null 2>&1 || true
+            fi
+        fi
+
+        # Reload udev / systemd / dbus / sysctl so the new policy +
+        # units + RT tuning take effect without requiring a reboot.
+        # Then auto-enable the Move runtime services. All of them have
+        # ConditionPathExists / ordering guards that make them no-op
+        # cleanly when prereqs are missing, so it's safe to enable on
+        # install regardless of whether the build is going through
+        # customize-image.sh or a direct dpkg -i on a target. The one
+        # exception is move-firstboot-data (live SD partition surgery)
+        # which is left disabled by design — see the data.mount section
+        # below for the bind-mount stand-in we ship instead.
+        if [ -d /run/systemd/system ]; then
+            udevadm control --reload-rules || true
+            udevadm trigger --subsystem-match=ablspi || true
+            systemctl daemon-reload || true
+            systemctl reload dbus.service 2>/dev/null || true
+            sysctl --system >/dev/null 2>&1 || true
+            for u in move-usb-gadget.service \
+                     move-xmos-init.service \
+                     move-launcher.service \
+                     move-web.service \
+                     move-xmos-shutdown.service; do
+                systemctl enable "$u" >/dev/null 2>&1 || true
+            done
+        fi
+
+        # Build + install the Move DT overlays into /boot/firmware/overlays/.
+        # The /etc/kernel/postinst.d/move-overlays hook re-runs this on
+        # every kernel update; here we do the initial population.
+        if [ -x /etc/kernel/postinst.d/move-overlays ]; then
+            /etc/kernel/postinst.d/move-overlays || true
+        fi
+
+        # Stage the WiFi credentials template on the FAT boot partition
+        # so the operator can populate it before first boot. The
+        # firstboot-wifi service reads it, writes an NM keyfile, then
+        # shreds the source.
+        if [ -d /boot/firmware ] && [ ! -f /boot/firmware/move-wifi.txt ] \
+           && [ ! -f /boot/firmware/move-wifi.txt.example ]; then
+            cp /usr/share/move-bringup/move-wifi.txt.example \
+               /boot/firmware/move-wifi.txt.example 2>/dev/null || true
+        fi
+
+        # Enable the firstboot-wifi service so it fires once if/when
+        # the operator places /boot/firmware/move-wifi.txt. The unit's
+        # ConditionPathExists makes it a no-op if the file is absent.
+        if [ -d /run/systemd/system ]; then
+            systemctl enable move-firstboot-wifi.service 2>/dev/null || true
+        fi
+
+        # swupdateprog-stub: hands MoveControlModeHandler a working
+        # /tmp/swupdateprog socket so it stops spinning on connect()
+        # and progresses to open /dev/ablspi0.0. See script header for
+        # the full reasoning. Enable + start now so install-time
+        # MoveLauncher works without a reboot.
+        if [ -d /run/systemd/system ]; then
+            systemctl enable swupdateprog-stub.service >/dev/null 2>&1 || true
+            systemctl start swupdateprog-stub.service >/dev/null 2>&1 || true
+        fi
+
+        # Pin the kernel packages so `apt upgrade` cannot replace our
+        # PREEMPT_RT kernel with a stock Armbian one. The .pref file in
+        # etc/apt/preferences.d makes them uninstallable from any source;
+        # apt-mark hold is the belt-and-braces backup that survives even
+        # full-upgrade. Idempotent.
+        if command -v apt-mark >/dev/null 2>&1; then
+            for pkg in linux-image-current-bcm2711 \
+                       linux-headers-current-bcm2711 \
+                       linux-dtb-current-bcm2711 \
+                       linux-image-edge-bcm2711 \
+                       linux-headers-edge-bcm2711 \
+                       linux-dtb-edge-bcm2711; do
+                if dpkg -l "$pkg" >/dev/null 2>&1; then
+                    apt-mark hold "$pkg" >/dev/null 2>&1 || true
+                fi
+            done
+        fi
+
+        # If config.txt doesn't already reference our overlays, append
+        # the Move section. Idempotent via grep guard.
+        config_txt=/boot/firmware/config.txt
+        if [ -f "$config_txt" ] && ! grep -q 'ableton-move-bringup' "$config_txt"; then
+            # Strip the family's otg_mode=1 from the [cm4] block - it
+            # forces the BCM2711 USB controller into xhci/host-only
+            # mode, killing the dwc2 OTG path the Move's USB-C uses
+            # for the NCM gadget.
+            sed -i '/^\[cm4\]/,/^\[/{ /^otg_mode=1$/d }' "$config_txt"
+
+            cat >> "$config_txt" <<'EOF'
+
+# ─── ableton-move-bringup ──────────────────────────────────────────
+[all]
+enable_uart=1
+dtparam=spi=on
+
+# I2C1 deliberately NOT enabled (would claim GPIO 3 = our ablspi IRQ).
+# The PCF85063 RTC is on I2C0 / GPIO 44+45 via our DT overlay.
+
+[cm4]
+# dwc2 in OTG mode (the family's otg_mode=1 was sed-removed above so
+# this takes effect instead of being overridden to xhci/host-only).
+dtoverlay=dwc2,dr_mode=otg
+dtoverlay=ablspi-move-cm4
+
+[cm5]
+dtoverlay=dwc2,dr_mode=otg
+dtoverlay=ablspi-move-cm5
+
+[all]
+EOF
+        fi
+        ;;
+
+    abort-upgrade|abort-remove|abort-deconfigure)
+        ;;
+
+    *)
+        echo "postinst called with unknown argument \`$1'" >&2
+        exit 1
+        ;;
+esac
+
+#DEBHELPER#
+exit 0

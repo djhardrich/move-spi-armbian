@@ -1,0 +1,15 @@
+[Unit]
+Description=Apply Move WiFi credentials on first boot from /boot/firmware/move-wifi.txt
+Documentation=file:///usr/share/move-bringup/move-wifi.txt.example
+After=NetworkManager.service local-fs.target
+Wants=NetworkManager.service
+Before=network-online.target
+ConditionPathExists=/boot/firmware/move-wifi.txt
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/usr/lib/move-bringup/firstboot-wifi.sh
+
+[Install]
+WantedBy=multi-user.target

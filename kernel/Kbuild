@@ -1,0 +1,2 @@
+obj-m += ablspi.o
+ccflags-y += -Wall -Wno-unused-function

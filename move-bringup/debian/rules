@@ -1,0 +1,27 @@
+#!/usr/bin/make -f
+# debian/rules for move-bringup + ablspi-dkms
+
+export DH_VERBOSE = 1
+
+ABLSPI_VERSION := $(shell dpkg-parsechangelog -SVersion | cut -d- -f1)
+
+%:
+	dh $@
+
+override_dh_auto_build:
+	$(MAKE) -C src/xmos-init
+
+override_dh_auto_clean:
+	$(MAKE) -C src/xmos-init clean
+
+override_dh_install:
+	# Lay out the runtime tree for move-bringup
+	install -D -m 0755 src/xmos-init/move-xmos-init \
+		debian/move-bringup/usr/sbin/move-xmos-init
+	dh_install
+	# Install the ablspi DKMS sources under /usr/src/ablspi-<ver>/
+	install -d debian/ablspi-dkms/usr/src/ablspi-$(ABLSPI_VERSION)
+	cp -r src/ablspi/* debian/ablspi-dkms/usr/src/ablspi-$(ABLSPI_VERSION)/
+
+override_dh_dkms:
+	dh_dkms -V $(ABLSPI_VERSION)

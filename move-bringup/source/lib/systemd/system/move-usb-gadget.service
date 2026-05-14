@@ -1,0 +1,16 @@
+[Unit]
+Description=Ableton Move USB-Ethernet NCM gadget
+Documentation=https://www.kernel.org/doc/Documentation/usb/gadget_configfs.rst
+After=systemd-modules-load.service sys-kernel-config.mount
+Before=network-pre.target
+Wants=network-pre.target
+ConditionPathExists=/sys/class/udc
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/usr/lib/move-bringup/setup-usb-network-gadget.sh start
+ExecStop=/usr/lib/move-bringup/setup-usb-network-gadget.sh stop
+
+[Install]
+WantedBy=multi-user.target

@@ -1,0 +1,45 @@
+Source: move-bringup
+Section: misc
+Priority: optional
+Maintainer: Move Port <move-port@localhost>
+Build-Depends: debhelper-compat (= 13),
+               dh-dkms,
+               dh-sequence-dkms
+Standards-Version: 4.6.2
+Homepage: https://github.com/local/move-bringup
+Rules-Requires-Root: no
+
+Package: ablspi-dkms
+Architecture: all
+Depends: ${misc:Depends}, dkms
+Description: ablspi kernel module for the Ableton Move (DKMS source)
+ Clean-room re-implementation of the ablspi SPI character driver that
+ carries audio, MIDI, and display data between the Move's Linux SoC
+ (CM4 or CM5) and its XMOS I/O microcontroller.
+ .
+ Exposes /dev/ablspi%d.%d with a 4 KB mmap-able shared buffer and the
+ 13-entry ioctl ABI defined by Ableton's GPL move-spi user-space library.
+ Builds for any kernel >= 6.6 via DKMS.
+
+Package: move-bringup
+Architecture: arm64
+Depends: ${misc:Depends}, ${shlibs:Depends},
+         ablspi-dkms,
+         adduser,
+         dbus,
+         device-tree-compiler,
+         python3,
+         systemd-sysv,
+         udev
+Recommends: u-boot-tools, util-linux (>= 2.35), parted, e2fsprogs,
+            network-manager, iw, coreutils (>= 8.30)
+Description: Ableton Move userspace bring-up files
+ Installs everything needed to run the stock Ableton Move user space
+ (/opt/move) on a Debian arm64 image: the ableton user and ablspi group,
+ udev rule for /dev/ablspi*, DBus system policy and service files,
+ modules-load.d entry, and systemd units for MoveLauncher, the web
+ service, the NCM USB-Ethernet gadget, and the XMOS power sequencer.
+ .
+ Does NOT include the Ableton-proprietary /opt/move binaries themselves;
+ you must populate /opt/move from your existing Move image (or from
+ Ableton's official update payload) before enabling the services.

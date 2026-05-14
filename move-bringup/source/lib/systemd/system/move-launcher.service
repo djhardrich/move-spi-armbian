@@ -1,0 +1,51 @@
+[Unit]
+Description=Ableton Move launcher
+Documentation=https://github.com/local/move-bringup
+After=systemd-modules-load.service dbus.service move-usb-gadget.service move-xmos-init.service data.mount swupdateprog-stub.service
+Wants=move-usb-gadget.service move-xmos-init.service swupdateprog-stub.service
+Requires=dbus.service data.mount
+ConditionPathExists=/opt/move/MoveLauncher
+ConditionPathExists=/dev/ablspi0.0
+
+[Service]
+# MoveLauncher does NOT double-fork to daemonize — it stays in the
+# foreground and forks ordinary children (XCrashpadHandler etc.). With
+# Type=forking systemd would TimeoutStartSec it out before MoveLauncher
+# announces readiness, then SIGTERM it. simple is correct here.
+Type=simple
+User=ableton
+# The `ableton` user's primary group is `users` (gid 100) per the stock
+# AbletonOS layout; there is no `ableton` group. Setting Group=ableton
+# would crash the unit with status=216/GROUP before ExecStart even fires.
+Group=users
+SupplementaryGroups=ablspi audio realtime dialout plugdev video render
+WorkingDirectory=/opt/move
+
+# Mirror /etc/init.d/move on the stock image: reset bootcount on a clean
+# start so the U-Boot A/B failover does not trip on a deliberate restart.
+# u-boot-tools is a Recommends, not a hard Depends, so fw_setenv may be
+# absent on a stripped-down build — the leading `-` makes the failure
+# non-fatal so the unit still starts.
+ExecStartPre=-/usr/bin/fw_setenv bootcount 0
+
+# RT scheduling tweaks must run BEFORE MoveLauncher does its first
+# XMOS handshake. The stock /etc/init.d/move runs `chrt -p 90 spi0`
+# + `chrt -p 91 ablspi` + IRQ/workqueue affinity right before launching
+# MoveLauncher; we mirror that order here. The `+` prefix runs as root
+# even though the rest of the unit runs as User=ableton.
+ExecStartPre=+/usr/lib/move-bringup/rt-tune.sh
+
+ExecStart=/opt/move/MoveLauncher
+
+KillMode=process
+
+Restart=on-failure
+RestartSec=2s
+
+# Real-time scheduling permissions for the audio loop.
+LimitRTPRIO=99
+LimitMEMLOCK=infinity
+LimitNICE=-20
+
+[Install]
+WantedBy=multi-user.target
