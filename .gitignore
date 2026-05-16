@@ -1,0 +1,46 @@
+# Working / scratch directories (not tracked)
+recon/
+
+# Personal firmware debs — contain proprietary content, never commit
+move-firmware_*.deb
+move-user-data_*.deb
+move-firmware_*_arm64.deb
+move-user-data_*_arm64.deb
+move-extra-*.deb
+
+# Kernel module build artefacts (.dtbo in dts/ is intentionally tracked)
+*.ko
+*.o
+*.mod
+*.mod.c
+*.cmd
+.tmp_versions/
+Module.symvers
+modules.order
+
+# Debian build outputs
+move-bringup/debian/move-bringup/
+move-bringup/debian/ablspi-dkms/
+move-bringup/debian/.debhelper/
+move-bringup/debian/*.substvars
+move-bringup/debian/*.log
+move-bringup/debian/files
+*.buildinfo
+*.changes
+
+# Editor / OS detritus
+*.swp
+*.swo
+*~
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/
+
+# AI assistant working directories
+.claude/
+.serena/
+
+# Compiled move-xmos-init binaries
+scripts/move-xmos-init
+move-bringup/src/xmos-init/move-xmos-init
