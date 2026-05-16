@@ -95,6 +95,14 @@ function pre_umount_final_image__zzz_move_finalise() {
         # XHCI mode, blocking the dwc2 OTG path the Move's USB-C needs.
         sed -i '/^\[cm4\]/,/^\[/{ /^otg_mode=1$/d }' "$CFG"
 
+        # Strip the family's `dtoverlay=dwc2,dr_mode=host` from [cm5].
+        # On CM5 the BCM2712 USB controller at /axi/usb@480000 is
+        # dwc2-compatible and the family ships host-mode as the default
+        # for it, but Move needs peripheral/OTG for the NCM gadget.
+        # Without this strip our [cm5] append produces two conflicting
+        # dwc2 overlay loads. Mirrored in move-bringup.postinst.
+        sed -i '/^\[cm5\]/,/^\[/{ /^dtoverlay=dwc2,dr_mode=host$/d }' "$CFG"
+
         cat >> "$CFG" <<'EOF'
 
 # ─── ableton-move-bringup ──────────────────────────────────────────

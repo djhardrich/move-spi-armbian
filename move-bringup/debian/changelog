@@ -1,3 +1,63 @@
+move-bringup (1.0.8-1) unstable; urgency=medium
+
+  * ablspi-move-cm5.dts: rewrote against the actual CM5/RP1 topology
+    after verifying the upstream raspberrypi/linux base DTBs
+    (bcm2712-rpi-cm5-{cm4io,cm5io}.dtb). The previous overlay was a
+    CM4-by-analogy stub that targeted &i2c0if / &i2c0mux / &i2c0_gpio44
+    — labels that do not exist on CM5, where carrier-side GPIO/SPI/I²C
+    live on the RP1 southbridge instead of the BCM2712 SoC. With those
+    unresolved labels the Pi firmware would silently fail the whole
+    overlay apply, taking ablspi down with it.
+    The new overlay:
+      - keeps &spi0 + irq-gpios=<&gpio 3 0>; both labels resolve to
+        RP1 (spi@50000 / gpio@d0000), CS0 stays on physical SODIMM
+        GPIO 8 per the base DTB's cs-gpios, ablspi-dkms binds via
+        compatible="ablspi" unchanged.
+      - targets &i2c5 (not &i2c0) for the PCF85063 RTC, because on
+        CM5/RP1 the alt-function for the 44/45 pin pair is i2c5, not
+        i2c0. The upstream pinctrl group `rp1_i2c5_44_45` (function=
+        i2c5, pins=gpio44+gpio45, drive-strength=12mA, bias-pull-up)
+        is drop-in correct — no manual mux.
+      - drops the i2c0mux/i2c0if disable fragments entirely. They were
+        a CM4 BCM2711 quirk; on CM5 those nodes are empty placeholders.
+    Verified by compiling the .dtbo and confirming all four __fixups__
+    labels (spi0, gpio, i2c5, rp1_i2c5_44_45) resolve against both
+    cm4io and cm5io base DTBs.
+  * config.txt: strip the family's `dtoverlay=dwc2,dr_mode=host` from
+    the [cm5] block before appending our `dr_mode=otg` line. On CM5
+    the BCM2712 USB controller at /axi/usb@480000 is dwc2-compatible
+    ("brcm,bcm2835-usb", status=disabled), and the stock dwc2.dtbo
+    applies cleanly via the &usb fixup — but the Armbian/RPi family
+    default routes it host-only for [cm5], which would conflict with
+    our Move/NCM-gadget OTG requirement. Mirrors the existing [cm4]
+    `otg_mode=1` strip, done in both move-bringup.postinst and the
+    Armbian board hook (move.csc pre_umount_final_image__zzz_move_finalise).
+
+ -- Move Port <move-port@localhost>  Thu, 15 May 2026 21:00:00 +0000
+
+move-bringup (1.0.7-1) unstable; urgency=medium
+
+  * move-web.service: three fixes that had it crash-looping since boot.
+    - Group=ableton → Group=users. There is no `ableton` group (the
+      ableton user's primary group is `users`, gid 100) so the unit
+      died with status=216/GROUP before ExecStart fired — same trap
+      already documented in move-launcher.service.
+    - start-stop-daemon path corrected from /usr/bin to /usr/sbin
+      (Debian ships it in /usr/sbin with a /sbin symlink); the wrong
+      path failed ExecStart/ExecStop with status=203/EXEC.
+    - Added AmbientCapabilities=CAP_NET_BIND_SERVICE so MoveWebService,
+      running as User=ableton, can bind privileged port 80 instead of
+      dying with "HttpServer couldn't start listening".
+  * mDNS / Bonjour: depend on avahi-daemon and libnss-mdns, and have
+    the postinst enable+start avahi-daemon. The device now advertises
+    itself as move.local with no DNS, and MoveLauncher's
+    org.freedesktop.Avahi D-Bus hostname query stops erroring. postinst
+    also ensures /etc/hostname and the 127.0.1.1 /etc/hosts entry are
+    `move` on the dpkg -i-on-a-running-target path (customize-image.sh
+    already pre-seeds this for image builds).
+
+ -- Move Port <move-port@localhost>  Thu, 14 May 2026 12:00:00 +0000
+
 move-bringup (1.0.6-1) unstable; urgency=medium
 
   * /data and its subtree (CoreLibrary, Scratch, settings, UserData)

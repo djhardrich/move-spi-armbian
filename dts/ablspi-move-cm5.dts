@@ -1,29 +1,45 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 /*
  * ablspi-move-cm5.dts - Device-tree overlay porting the Ableton Move's
- * CM4-era custom bindings forward to Raspberry Pi Compute Module 5 (BCM2712).
+ * CM4-era custom bindings forward to Raspberry Pi Compute Module 5 (BCM2712 + RP1).
  *
- * Apply on top of the stock rpi-6.6.y+ CM5 base DTB. Carries forward exactly
- * the Move additions found in the original move-cm4-complete-devicetree.dtb:
+ * On CM5 the carrier-facing GPIO/SPI/I²C peripherals live on the RP1
+ * southbridge (PCIe-attached), not on the BCM2712 SoC. The Pi firmware
+ * and upstream rpi linux already expose RP1 controllers under stable DT
+ * labels and pre-canned pinctrl groups, so the overlay reduces to:
  *
- *   1. &spi0 chip-select 0 is the XMOS link: compatible "ablspi", irq-gpio = 3,
- *      max 125 MHz (the driver clocks at 20 MHz by default).
- *   2. &spi0 chip-select 1 is disabled.
- *   3. PCF85063 RTC on BSC0 via i2c0_gpio44 (GPIO 44/45). The base DTB
- *      label for the BSC0 controller is &i2c0if (NOT &i2c0, which is a
- *      mux child) - matches BCM2711 convention; verify on CM5 hardware.
+ *   1. &spi0 -> RP1 spi0 (/axi/pcie@.../rp1/spi@50000). CS0 is wired
+ *      to physical SODIMM GPIO 8 in the base DTB's cs-gpios, matching
+ *      CM4 BCM2711 spi0 — i.e. the XMOS is on the same physical CS pin
+ *      and the ablspi-dkms driver binds cleanly via compatible="ablspi".
+ *      &gpio -> RP1 gpio bank (/axi/pcie@.../rp1/gpio@d0000); the
+ *      ablspi IRQ on physical GPIO 3 resolves to the same SODIMM pin
+ *      as on CM4, so irq-gpios = <&gpio 3 0> is correct unchanged.
  *
- * dwc2 OTG: NOT configured here. The Pi firmware mechanism is used
- * instead via `dtoverlay=dwc2,dr_mode=otg` in /boot/firmware/config.txt
- * (added by move-bringup's postinst and the Armbian board hook).
- * The base CM5 DTB does not expose a `&dwc2` label, so targeting it
- * from a DT overlay silently fails the whole overlay apply.
+ *   2. &spi0 chip-select 1 stays disabled.
+ *
+ *   3. PCF85063 RTC on the Move carrier's SODIMM GPIO 44/45 pins. On
+ *      CM5/RP1 the 44/45 pin pair's I²C alt-function is i2c5 (not the
+ *      BCM2711-era i2c0 the CM4 overlay uses). RP1 ships a pre-built
+ *      pinctrl group `rp1_i2c5_44_45` with function="i2c5",
+ *      pins="gpio44","gpio45", drive-strength=12mA, bias-pull-up — drop
+ *      it in and we're done; no manual pin mux required.
+ *
+ * dwc2 / USB-OTG: not configured here. On CM5 the BCM2712-side USB
+ * controller at /axi/usb@480000 is dwc2-compatible (compat string
+ * "brcm,bcm2835-usb", status=disabled by default), and the stock
+ * dwc2.dtbo's __fixups__ target the &usb label correctly. So
+ * `dtoverlay=dwc2,dr_mode=otg` in /boot/firmware/config.txt does the
+ * right thing on CM5. The Armbian/family default of dr_mode=host in the
+ * [cm5] block must be stripped first (move-bringup.postinst + the
+ * Armbian board hook handle that, mirroring the existing CM4
+ * otg_mode=1 strip).
  *
  * Build:   dtc -@ -I dts -O dtb -o ablspi-move-cm5.dtbo ablspi-move-cm5.dts
  * Install: copy to /boot/firmware/overlays/ then add
  *              dtoverlay=ablspi-move-cm5
- *          to /boot/firmware/config.txt. Override examples:
- *              dtoverlay=ablspi-move-cm5,ablspi_irq_gpio=3,ablspi_max_hz=20000000
+ *          to /boot/firmware/config.txt under [cm5]. Override examples:
+ *              dtoverlay=ablspi-move-cm5,ablspi_max_hz=20000000
  */
 
 /dts-v1/;
@@ -42,9 +58,9 @@
 	};
 
 	/*
-	 * SPI0: ablspi on CS0, nothing on CS1. We delete the upstream spidev
-	 * children that the rpi-6.6.y base typically attaches so our binding
-	 * wins regardless of overlay load order.
+	 * SPI0 (RP1): ablspi on CS0, nothing on CS1. We delete the upstream
+	 * spidev children the base DTB attaches so our ablspi binding wins
+	 * regardless of overlay load order.
 	 */
 	fragment@1 {
 		target = <&spi0>;
@@ -62,8 +78,11 @@
 				spi-max-frequency = <125000000>;
 
 				/*
-				 * Modern descriptor-based GPIO binding.
-				 * See ablspi-move-cm4.dts for rationale.
+				 * Modern descriptor-based GPIO binding. &gpio
+				 * resolves to RP1's gpio controller; GPIO 3
+				 * is the same physical SODIMM pin as on CM4.
+				 * See ablspi-move-cm4.dts for the bare-int vs
+				 * descriptor rationale.
 				 */
 				irq-gpios = <&gpio 3 0>;
 			};
@@ -78,40 +97,22 @@
 	};
 
 	/*
-	 * PCF85063 RTC on BSC0 routed to the same GPIO 44/45 pin pair the
-	 * stock Move uses. See ablspi-move-cm4.dts for the full rationale
-	 * (avoiding GPIO 3 / I2C1-SCL contention with the ablspi IRQ).
-	 * On CM5 the BCM2712 has the same pinctrl group name (`i2c0_gpio44`)
-	 * in upstream raspberrypi/linux. If your CM5 kernel exposes it
-	 * under a different name, retarget the pinctrl-0 reference below.
+	 * PCF85063 RTC on RP1 i2c5 routed to GPIO 44/45 via the upstream
+	 * `rp1_i2c5_44_45` pinctrl group (function="i2c5", pins=44+45,
+	 * drive-strength=12mA, bias-pull-up — pre-canned in the CM5 base
+	 * DTB, no manual mux required). The RTC reads the BCM2711 carrier's
+	 * 44/45 pin pair on CM4 via BSC0; on CM5/RP1 those same physical
+	 * pins are reached via designware i2c5 instead. PCB-side: same two
+	 * traces, same chip, same address.
 	 */
-	fragment@3 {
-		target = <&i2c0mux>;
-		__overlay__ {
-			status = "disabled";
-		};
-	};
-
-	fragment@4 {
-		/*
-		 * Target &i2c0if, NOT &i2c0. In Armbian's BCM2711 base DTB
-		 * (verified on hardware) the labels split as:
-		 *   i2c0if -> /soc/i2c@7e205000   (the real BSC0 controller)
-		 *   i2c0   -> /soc/i2c0mux/i2c@0  (a mux child node)
-		 * Targeting &i2c0 landed on the mux child which has no
-		 * status property to flip, and the overlay apply silently
-		 * failed. CM5/BCM2712 likely uses the same naming convention
-		 * since both come from upstream raspberrypi/linux. If your
-		 * CM5 base DTB exposes the controller under a different
-		 * label, retarget here.
-		 */
-		target = <&i2c0if>;
+	fragment@2 {
+		target = <&i2c5>;
 		__overlay__ {
 			#address-cells = <1>;
 			#size-cells = <0>;
 			status = "okay";
 			pinctrl-names = "default";
-			pinctrl-0 = <&i2c0_gpio44>;
+			pinctrl-0 = <&rp1_i2c5_44_45>;
 			clock-frequency = <100000>;
 
 			move_rtc: rtc@51 {
@@ -122,18 +123,8 @@
 		};
 	};
 
-	/*
-	 * dwc2 / USB-OTG: not configured here. See header comment - the
-	 * Pi firmware's runtime mechanism (`dtoverlay=dwc2,dr_mode=otg`
-	 * in config.txt) is used instead, because Armbian's CM5 base DTB
-	 * does not expose a `&dwc2` label and including the fragment
-	 * causes the whole overlay apply to fail silently, taking the
-	 * ablspi node down with it.
-	 */
-
 	__overrides__ {
-		ablspi_irq_gpio = <&ablspi>,"irq-gpio:0";
-		ablspi_max_hz   = <&ablspi>,"spi-max-frequency:0";
-		rtc_addr        = <&move_rtc>,"reg:0";
+		ablspi_max_hz = <&ablspi>,"spi-max-frequency:0";
+		rtc_addr      = <&move_rtc>,"reg:0";
 	};
 };

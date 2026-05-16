@@ -63,6 +63,21 @@ case "$1" in
             fi
         done
 
+        # Identify the device as `move` so Avahi advertises it as
+        # move.local over mDNS. customize-image.sh pre-seeds this on an
+        # image build; doing it here too covers the dpkg -i-on-a-running
+        # -target path. Idempotent — only rewrites when not already set.
+        if [ "$(cat /etc/hostname 2>/dev/null)" != "move" ]; then
+            echo "move" > /etc/hostname
+            if [ -d /run/systemd/system ]; then
+                hostnamectl set-hostname move >/dev/null 2>&1 || true
+            fi
+        fi
+        if ! grep -qE '^127\.0\.1\.1[[:space:]]+move$' /etc/hosts 2>/dev/null; then
+            sed -i '/^127\.0\.1\.1/d' /etc/hosts
+            echo "127.0.1.1   move" >> /etc/hosts
+        fi
+
         # Set up the /data bind-mount. MoveLauncher gates a "No Data
         # Partition" cosmetic display on `findmnt --mountpoint /data`
         # succeeding; without a real mount entry it shows that message
@@ -133,6 +148,15 @@ case "$1" in
                      move-xmos-shutdown.service; do
                 systemctl enable "$u" >/dev/null 2>&1 || true
             done
+
+            # Avahi (a hard Depends) advertises <hostname>.local over
+            # mDNS so the device is reachable as move.local with no DNS,
+            # and provides the org.freedesktop.Avahi D-Bus name that
+            # MoveLauncher queries for the hostname. libnss-mdns wires
+            # .local into nsswitch for outbound resolution via its own
+            # maintainer scripts. Enable + start now so it works without
+            # a reboot.
+            systemctl enable --now avahi-daemon.service >/dev/null 2>&1 || true
         fi
 
         # Build + install the Move DT overlays into /boot/firmware/overlays/.
@@ -197,6 +221,16 @@ case "$1" in
             # for the NCM gadget.
             sed -i '/^\[cm4\]/,/^\[/{ /^otg_mode=1$/d }' "$config_txt"
 
+            # Strip the family's `dtoverlay=dwc2,dr_mode=host` from the
+            # [cm5] block. On CM5 the USB-C controller at /axi/usb@480000
+            # is dwc2-compatible (compat="brcm,bcm2835-usb") and the
+            # stock dwc2.dtbo applies cleanly; the family ships host-mode
+            # as the [cm5] default but Move needs peripheral/OTG for the
+            # NCM gadget. Without this strip we'd append our own
+            # dr_mode=otg line and end up with two conflicting dwc2
+            # overlay loads under [cm5].
+            sed -i '/^\[cm5\]/,/^\[/{ /^dtoverlay=dwc2,dr_mode=host$/d }' "$config_txt"
+
             cat >> "$config_txt" <<'EOF'
 
 # ─── ableton-move-bringup ──────────────────────────────────────────
@@ -205,7 +239,8 @@ enable_uart=1
 dtparam=spi=on
 
 # I2C1 deliberately NOT enabled (would claim GPIO 3 = our ablspi IRQ).
-# The PCF85063 RTC is on I2C0 / GPIO 44+45 via our DT overlay.
+# The PCF85063 RTC is on I2C0/GPIO 44+45 (CM4) or I2C5/GPIO 44+45 (CM5)
+# via our per-variant DT overlay.
 
 [cm4]
 # dwc2 in OTG mode (the family's otg_mode=1 was sed-removed above so
@@ -214,6 +249,9 @@ dtoverlay=dwc2,dr_mode=otg
 dtoverlay=ablspi-move-cm4
 
 [cm5]
+# dwc2 in OTG mode (the family's dr_mode=host line was sed-removed
+# above). Drives /axi/usb@480000 (the BCM2712-side dwc2 controller)
+# as the USB-C gadget endpoint.
 dtoverlay=dwc2,dr_mode=otg
 dtoverlay=ablspi-move-cm5
 
