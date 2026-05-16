@@ -1,3 +1,36 @@
+move-bringup (1.0.10-1) unstable; urgency=medium
+
+  * move-usb-gadget.service: makes the NCM USB-Ethernet gadget
+    actually come up on CM5 (and stay reliable on CM4 across re-runs).
+    Two fixes, both verified-on-hardware on CM5 Rev 1.0 + Armbian
+    current 6.18.29-bcm2711:
+    - New /etc/modules-load.d/move-usb-gadget.conf preloads
+      libcomposite + usb_f_ncm at boot. Without these, the kernel
+      hasn't registered the usb_gadget subsystem with configfs by the
+      time setup-usb-network-gadget.sh runs, so the script's first
+      `mkdir /sys/kernel/config/usb_gadget/g1` fails with EPERM.
+      Belt-and-braces modprobe in the script itself self-recovers if
+      modules-load.d is somehow stripped.
+    - setup-usb-network-gadget.sh start now calls stop first to clear
+      partial state from a failed previous run. Without this, residual
+      configs/c.1 left half-initialised by an aborted prior run
+      caused `ln: failed to create symbolic link 'configs/c.1/ncm.usb0':
+      No such file or directory` on every subsequent invocation.
+      Stop tear-down extended to also rmdir the strings/, os_desc/,
+      and interface.ncm/ subtrees that the original script left behind.
+  * BUILD.md §4c: new CM5-only first-boot step documenting the
+    BCM2712 EEPROM bootloader flash via `rpi-eeprom-update -f
+    /tmp/pieeprom-2026-05-13.bin` (downloaded from upstream
+    raspberrypi/rpi-eeprom). Without a current EEPROM the BCM2712
+    firmware-mailbox rejects SET_POWER_STATE / GET_CLOCKS, leaving
+    dwc2 / v3d / pispbe / raspberrypi-clk all failing with -22 (full
+    cascade documented in §6d). Note: the Debian-packaged
+    `rpi-eeprom-update -a` flashes a 2023-era blob from the package's
+    bundled "default" channel — too old to help — so the docs steer
+    users to `-f` with an explicitly-fetched recent .bin instead.
+
+ -- Move Port <move-port@localhost>  Fri, 16 May 2026 16:00:00 +0000
+
 move-bringup (1.0.9-1) unstable; urgency=medium
 
   * ablspi-move-cm5.dts: RTC fragment removed — turns out it can't work

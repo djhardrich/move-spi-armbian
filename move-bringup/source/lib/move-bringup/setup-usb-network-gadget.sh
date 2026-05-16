@@ -14,6 +14,15 @@ INSTANCE_NAME="ncm.usb0"
 LANGUAGE="0x409"
 CONFIG="c.1"
 
+ensure_modules() {
+    # Belt-and-braces: /etc/modules-load.d/move-usb-gadget.conf should
+    # have loaded these at boot. If something stripped that file or the
+    # service ran before systemd-modules-load.service somehow, we
+    # self-recover here. modprobe is a no-op if already loaded.
+    modprobe libcomposite 2>/dev/null || true
+    modprobe usb_f_ncm    2>/dev/null || true
+}
+
 ensure_configfs() {
     [ -d "$CONFIGFS_HOME/usb_gadget" ] && return 0
     mount -t configfs none "$CONFIGFS_HOME"
@@ -90,7 +99,16 @@ enable_gadget() {
 }
 
 start() {
+    ensure_modules
     ensure_configfs
+    # If a previous run left partial state, tear it down first so we
+    # start from a clean tree. Without this, a re-run after a partial
+    # failure (e.g. stop() not finishing cleanly) trips
+    #   ln: failed to create symbolic link 'configs/c.1/ncm.usb0':
+    #   No such file or directory
+    # because configfs left configs/c.1 in a half-initialised state
+    # that mkdir -p doesn't recover.
+    stop
     create_gadget
     cd "$CONFIGFS_HOME/usb_gadget/$GADGET_NAME"
     write_usb_ids
@@ -103,14 +121,35 @@ start() {
 
 stop() {
     cd "$CONFIGFS_HOME/usb_gadget/$GADGET_NAME" 2>/dev/null || return 0
-    : > UDC || true
-    rm -f "configs/$CONFIG/$INSTANCE_NAME" "os_desc/$CONFIG"
-    rmdir "configs/$CONFIG/strings/$LANGUAGE" 2>/dev/null || true
-    rmdir "configs/$CONFIG"                   2>/dev/null || true
-    rmdir "functions/$INSTANCE_NAME"          2>/dev/null || true
-    rmdir "strings/$LANGUAGE"                 2>/dev/null || true
+    # Unbind the UDC first — every other cleanup step requires the
+    # gadget to be deactivated, otherwise configfs returns EBUSY.
+    : > UDC 2>/dev/null || true
+
+    # Tear down in reverse dependency order. rmdir on configfs nodes
+    # returns success only when the node has no remaining children, so
+    # we work from leaves inward. The 2>/dev/null || true suppression
+    # is intentional — we want to plow through partial state.
+
+    # Detach the NCM function from the config (these are symlinks).
+    rm -f "configs/$CONFIG/$INSTANCE_NAME"     2>/dev/null || true
+    rm -f "os_desc/$CONFIG"                    2>/dev/null || true
+
+    # Tear down the config: leaf strings dir first, then the config.
+    rmdir "configs/$CONFIG/strings/$LANGUAGE"  2>/dev/null || true
+    rmdir "configs/$CONFIG/strings"            2>/dev/null || true
+    rmdir "configs/$CONFIG"                    2>/dev/null || true
+
+    # Tear down the function's OS descriptor subtree.
+    rmdir "functions/$INSTANCE_NAME/os_desc/interface.ncm" 2>/dev/null || true
+    rmdir "functions/$INSTANCE_NAME/os_desc"   2>/dev/null || true
+    rmdir "functions/$INSTANCE_NAME"           2>/dev/null || true
+
+    # Tear down the top-level strings tree.
+    rmdir "strings/$LANGUAGE"                  2>/dev/null || true
+
+    # Finally remove the gadget itself.
     cd "$CONFIGFS_HOME/usb_gadget"
-    rmdir "$GADGET_NAME" 2>/dev/null || true
+    rmdir "$GADGET_NAME"                       2>/dev/null || true
 }
 
 case "${1:-start}" in

@@ -26,8 +26,10 @@ Architecture: arm64
 Depends: ${misc:Depends}, ${shlibs:Depends},
          ablspi-dkms,
          adduser,
+         avahi-daemon,
          dbus,
          device-tree-compiler,
+         libnss-mdns,
          python3,
          systemd-sysv,
          udev
@@ -39,6 +41,10 @@ Description: Ableton Move userspace bring-up files
  udev rule for /dev/ablspi*, DBus system policy and service files,
  modules-load.d entry, and systemd units for MoveLauncher, the web
  service, the NCM USB-Ethernet gadget, and the XMOS power sequencer.
+ .
+ Pulls in avahi-daemon and libnss-mdns so the device is reachable as
+ move.local over mDNS/Bonjour and so MoveLauncher's org.freedesktop.Avahi
+ D-Bus query for the hostname succeeds.
  .
  Does NOT include the Ableton-proprietary /opt/move binaries themselves;
  you must populate /opt/move from your existing Move image (or from

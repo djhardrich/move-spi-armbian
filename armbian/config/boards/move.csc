@@ -53,7 +53,8 @@ declare -g PACKAGE_LIST_BOARD="u-boot-tools parted e2fsprogs \
                                device-tree-compiler network-manager \
                                iw dkms build-essential debhelper dh-dkms \
                                firmware-iwlwifi firmware-brcm80211 \
-                               bluez-firmware wireless-regdb"
+                               bluez-firmware wireless-regdb \
+                               rpi-eeprom libraspberrypi-bin"
 
 # firmware-iwlwifi:    Intel WiFi binary firmware for the Move carrier's
 #                      Intel 9260 PCIe card.
@@ -69,6 +70,20 @@ declare -g PACKAGE_LIST_BOARD="u-boot-tools parted e2fsprogs \
 #                      ensures the firmware is on disk when the kernel
 #                      BT stack asks for it.
 # wireless-regdb:      regulatory domain database so iw can set country.
+# rpi-eeprom:          CM5 (BCM2712) second-stage bootloader updater.
+#                      Without this + a manual `rpi-eeprom-update -a`
+#                      on first boot, the CM5 stays on whatever stale
+#                      bootloader its eMMC shipped with, and the BCM2712
+#                      firmware-mailbox protocol may not honor newer
+#                      SET_POWER_STATE / GET_CLOCKS calls — that's the
+#                      root cause of dwc2/v3d/raspberrypi-clk failing
+#                      with -22 on CM5 (verified on hardware; see
+#                      BUILD.md §6d). Harmless on CM4 (different
+#                      bootloader path, package no-ops).
+# libraspberrypi-bin:  Provides vcgencmd, which rpi-eeprom-update needs
+#                      to query the current bootloader version. Without
+#                      it, the eeprom updater fails with "vcgencmd: not
+#                      found" and the bootloader never gets updated.
 # All live in Debian non-free-firmware, auto-enabled in debootstrapped
 # trixie images since Debian 12.
 

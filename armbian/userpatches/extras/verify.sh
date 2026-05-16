@@ -222,6 +222,67 @@ for unit in move-launcher.service move-web.service \
     fi
 done
 
+# ── mDNS / Bonjour (move.local) ─────────────────────────────────────────
+# avahi-daemon + libnss-mdns are Depends of move-bringup so the device
+# advertises itself as move.local for outside clients and MoveLauncher's
+# org.freedesktop.Avahi D-Bus hostname query succeeds.
+echo "----- mDNS / Bonjour -----"
+if dpkg -l avahi-daemon 2>/dev/null | grep -q ^ii; then
+    PASS "avahi-daemon installed"
+else
+    FAIL "avahi-daemon not installed — move.local won't resolve from peers"
+fi
+if dpkg -l libnss-mdns 2>/dev/null | grep -q ^ii; then
+    PASS "libnss-mdns installed"
+else
+    WARN "libnss-mdns not installed — this host can't resolve other *.local names"
+fi
+if [ -f /lib/systemd/system/avahi-daemon.service ] \
+   || [ -f /usr/lib/systemd/system/avahi-daemon.service ]; then
+    if systemctl is-enabled --quiet avahi-daemon.service; then
+        PASS "avahi-daemon.service enabled"
+    else
+        FAIL "avahi-daemon.service installed but not enabled"
+    fi
+    if systemctl is-active --quiet avahi-daemon.service; then
+        PASS "avahi-daemon.service active"
+    else
+        FAIL "avahi-daemon.service not active"
+    fi
+fi
+# libnss-mdns' postinst inserts "mdns4_minimal [NOTFOUND=return]" into
+# the nsswitch hosts line. Without it, .local lookups on this host fall
+# through to DNS (which won't have them) and time out.
+if grep -E '^hosts:.*\bmdns' /etc/nsswitch.conf >/dev/null 2>&1; then
+    PASS "/etc/nsswitch.conf hosts line includes mdns"
+else
+    WARN "/etc/nsswitch.conf hosts line has no mdns entry — outbound *.local won't resolve"
+fi
+# Hostname has to be `move` for Avahi to advertise the device as
+# move.local. customize-image.sh sets it on image build; the .deb's
+# postinst sets it on dpkg -i.
+hn=$(cat /etc/hostname 2>/dev/null)
+if [ "$hn" = "move" ]; then
+    PASS "/etc/hostname = move (advertised as move.local)"
+else
+    FAIL "/etc/hostname is \"$hn\" — Avahi will advertise as ${hn}.local, not move.local"
+fi
+if grep -qE '^127\.0\.1\.1[[:space:]]+move(\b|$)' /etc/hosts 2>/dev/null; then
+    PASS "/etc/hosts has 127.0.1.1 -> move"
+else
+    WARN "/etc/hosts has no 127.0.1.1 -> move entry"
+fi
+# Verify org.freedesktop.Avahi actually owns its bus name (this is the
+# call MoveLauncher makes; without it the launcher journal fills with
+# "Couldn't get host name: ... ServiceUnknown" errors).
+if command -v busctl >/dev/null 2>&1; then
+    if busctl --system list 2>/dev/null | awk '{print $1}' | grep -qx org.freedesktop.Avahi; then
+        PASS "org.freedesktop.Avahi present on the system bus"
+    else
+        FAIL "org.freedesktop.Avahi not on the system bus — MoveLauncher hostname query will fail"
+    fi
+fi
+
 # ── /opt/move stack (operator-supplied, not in our packages) ────────────
 echo "----- /opt/move -----"
 if [ -x /opt/move/MoveLauncher ]; then

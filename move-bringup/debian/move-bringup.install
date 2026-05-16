@@ -1,4 +1,5 @@
 source/etc/modules-load.d/ablspi.conf            etc/modules-load.d
+source/etc/modules-load.d/move-usb-gadget.conf   etc/modules-load.d
 source/etc/udev/rules.d/50-ablspi.rules          lib/udev/rules.d
 source/etc/dbus-1/system.d/move.conf             etc/dbus-1/system.d
 source/usr/share/dbus-1/system-services/         usr/share/dbus-1

@@ -7,12 +7,21 @@ ConditionPathExists=/opt/move/MoveWebService
 [Service]
 Type=forking
 User=ableton
-Group=ableton
+# The `ableton` user's primary group is `users` (gid 100) per the stock
+# AbletonOS layout; there is no `ableton` group. Setting Group=ableton
+# crashes the unit with status=216/GROUP before ExecStart even fires.
+Group=users
 SupplementaryGroups=ablspi
 WorkingDirectory=/opt/move
-ExecStart=/usr/bin/start-stop-daemon --start --background \
+# MoveWebService binds port 80; as User=ableton it otherwise can't bind a
+# privileged (<1024) port and dies with "HttpServer couldn't start
+# listening". Grant just CAP_NET_BIND_SERVICE rather than running as root.
+AmbientCapabilities=CAP_NET_BIND_SERVICE
+# Debian ships start-stop-daemon in /usr/sbin (with a /sbin symlink), not
+# /usr/bin — a /usr/bin path fails ExecStart with status=203/EXEC.
+ExecStart=/usr/sbin/start-stop-daemon --start --background \
     --chuid ableton --exec /opt/move/MoveWebService
-ExecStop=/usr/bin/start-stop-daemon --stop --name MoveWebService --retry 5
+ExecStop=/usr/sbin/start-stop-daemon --stop --name MoveWebService --retry 5
 Restart=on-failure
 RestartSec=2s
 
