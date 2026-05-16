@@ -52,13 +52,25 @@ declare -g MODULES_BLACKLIST=""
 declare -g PACKAGE_LIST_BOARD="u-boot-tools parted e2fsprogs \
                                device-tree-compiler network-manager \
                                iw dkms build-essential debhelper dh-dkms \
-                               firmware-iwlwifi wireless-regdb"
+                               firmware-iwlwifi firmware-brcm80211 \
+                               bluez-firmware wireless-regdb"
 
-# firmware-iwlwifi: Intel WiFi card binary firmware (Move ships an
-# Intel card over PCIe, not the CM4's onboard Broadcom radio).
-# wireless-regdb: regulatory domain database so iw can set country.
-# Both live in Debian non-free-firmware which is auto-enabled in
-# debootstrapped trixie images (since Debian 12).
+# firmware-iwlwifi:    Intel WiFi binary firmware for the Move carrier's
+#                      Intel 9260 PCIe card.
+# firmware-brcm80211:  Broadcom/Cypress WiFi firmware for the CM5's
+#                      onboard SDIO radio (CYW43455 / similar). Harmless
+#                      on CM4 (carrier has no Brcm radio); needed on CM5
+#                      so brcmfmac doesn't fail probe with missing
+#                      brcm/brcmfmac*.bin.
+# bluez-firmware:      Broadcom BT firmware blobs (BCM4345C0 etc.) for
+#                      the CM5 combo radio. Doesn't pull in bluez itself
+#                      (bluetoothd / bluetoothctl) — install separately
+#                      if you actually want to use BT; for now this just
+#                      ensures the firmware is on disk when the kernel
+#                      BT stack asks for it.
+# wireless-regdb:      regulatory domain database so iw can set country.
+# All live in Debian non-free-firmware, auto-enabled in debootstrapped
+# trixie images since Debian 12.
 
 # Install the locally-built kernel headers so ablspi-dkms can compile
 # the module at first install. Armbian builds the headers .deb but
