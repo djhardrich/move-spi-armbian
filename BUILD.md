@@ -327,8 +327,10 @@ writing — bump the filename if a newer one exists upstream):
 
 ```sh
 sudo apt update
-# Packages are already in PACKAGE_LIST_BOARD as of move-bringup 1.0.10+,
-# but apt install is a no-op if they're already there:
+# Both packages are installed best-effort by customize-image.sh during
+# the image build (1.0.11+), but if the build couldn't find them in
+# its apt sources, install them manually now. apt install is a no-op
+# if they're already there:
 sudo apt install -y libraspberrypi-bin rpi-eeprom
 
 # Inspect the current EEPROM — anything before 2026 is stale on a Move:

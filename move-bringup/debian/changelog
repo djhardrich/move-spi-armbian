@@ -1,3 +1,21 @@
+move-bringup (1.0.11-1) unstable; urgency=medium
+
+  * Build fix: move rpi-eeprom + libraspberrypi-bin out of
+    PACKAGE_LIST_BOARD (move.csc) and into customize-image.sh as
+    best-effort installs (`apt install ... || true`). At the
+    PACKAGE_LIST_BOARD dry-run stage, Armbian's chroot apt sources
+    don't include the rpi-vendored archive that provides
+    libraspberrypi-bin, so the dry-run fails with
+        E: Package 'libraspberrypi-bin' has no installation candidate
+    breaking the build. Installing later, in customize-image.sh after
+    the chroot's sources are fully configured, is more reliable; the
+    `|| true` keeps the build resilient if either package still can't
+    be found (in which case BUILD.md §4c documents the manual install
+    end users can do after first boot). No functional change for
+    end users on a successful build.
+
+ -- Move Port <move-port@localhost>  Fri, 16 May 2026 16:30:00 +0000
+
 move-bringup (1.0.10-1) unstable; urgency=medium
 
   * move-usb-gadget.service: makes the NCM USB-Ethernet gadget

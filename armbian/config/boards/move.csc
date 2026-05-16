@@ -53,8 +53,7 @@ declare -g PACKAGE_LIST_BOARD="u-boot-tools parted e2fsprogs \
                                device-tree-compiler network-manager \
                                iw dkms build-essential debhelper dh-dkms \
                                firmware-iwlwifi firmware-brcm80211 \
-                               bluez-firmware wireless-regdb \
-                               rpi-eeprom libraspberrypi-bin"
+                               bluez-firmware wireless-regdb"
 
 # firmware-iwlwifi:    Intel WiFi binary firmware for the Move carrier's
 #                      Intel 9260 PCIe card.
@@ -70,22 +69,20 @@ declare -g PACKAGE_LIST_BOARD="u-boot-tools parted e2fsprogs \
 #                      ensures the firmware is on disk when the kernel
 #                      BT stack asks for it.
 # wireless-regdb:      regulatory domain database so iw can set country.
-# rpi-eeprom:          CM5 (BCM2712) second-stage bootloader updater.
-#                      Without this + a manual `rpi-eeprom-update -a`
-#                      on first boot, the CM5 stays on whatever stale
-#                      bootloader its eMMC shipped with, and the BCM2712
-#                      firmware-mailbox protocol may not honor newer
-#                      SET_POWER_STATE / GET_CLOCKS calls — that's the
-#                      root cause of dwc2/v3d/raspberrypi-clk failing
-#                      with -22 on CM5 (verified on hardware; see
-#                      BUILD.md §6d). Harmless on CM4 (different
-#                      bootloader path, package no-ops).
-# libraspberrypi-bin:  Provides vcgencmd, which rpi-eeprom-update needs
-#                      to query the current bootloader version. Without
-#                      it, the eeprom updater fails with "vcgencmd: not
-#                      found" and the bootloader never gets updated.
 # All live in Debian non-free-firmware, auto-enabled in debootstrapped
 # trixie images since Debian 12.
+#
+# Note: rpi-eeprom and libraspberrypi-bin (needed on CM5 for the
+# EEPROM update path documented in BUILD.md §4c) are NOT listed here.
+# They aren't reliably available in Armbian's pre-rootfs apt dry-run
+# (the chroot's apt sources at that stage don't include the rpi-
+# vendored archive that provides libraspberrypi-bin / vcgencmd), and
+# putting them in PACKAGE_LIST_BOARD causes the dry-run to fail with
+# "Package 'libraspberrypi-bin' has no installation candidate".
+# customize-image.sh installs them later as a best-effort step
+# (apt install with || true) when the chroot's apt sources are
+# fully configured. On CM4 builds, both packages either install or
+# get silently skipped — neither is needed for CM4 boot.
 
 # Install the locally-built kernel headers so ablspi-dkms can compile
 # the module at first install. Armbian builds the headers .deb but

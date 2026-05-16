@@ -103,6 +103,21 @@ for extra in "$EXTRAS_DIR"/move-firmware_*.deb \
     apt-get install -y --no-install-recommends "$extra"
 done
 
+# Best-effort install of the CM5 EEPROM update tooling. These two
+# can't go in PACKAGE_LIST_BOARD (the pre-rootfs apt dry-run can't
+# find libraspberrypi-bin in Armbian's chroot sources), so we install
+# them here where the chroot's apt sources are fully populated. The
+# `|| true` makes the build resilient — if either package isn't
+# available, the build continues without it. BUILD.md §4c documents
+# the manual install fallback for end users.
+#   rpi-eeprom         : CM5 (BCM2712) second-stage bootloader updater.
+#   libraspberrypi-bin : provides vcgencmd, needed by rpi-eeprom-update.
+echo "customize-image.sh: best-effort install of CM5 EEPROM tooling"
+apt-get install -y --no-install-recommends rpi-eeprom || \
+    echo "customize-image.sh: WARNING: rpi-eeprom unavailable; see BUILD.md §4c for manual install"
+apt-get install -y --no-install-recommends libraspberrypi-bin || \
+    echo "customize-image.sh: WARNING: libraspberrypi-bin unavailable; see BUILD.md §4c for manual install"
+
 # ── 2. DT overlays now ship inside the move-bringup .deb ─────────────
 # The .deb's postinst builds them from /usr/share/move-bringup/overlays-src/
 # and installs them to /boot/firmware/overlays/, plus an
