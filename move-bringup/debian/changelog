@@ -1,3 +1,49 @@
+move-bringup (1.0.9-1) unstable; urgency=medium
+
+  * ablspi-move-cm5.dts: RTC fragment removed — turns out it can't work
+    on CM5 without a hardware mod. Verified on hardware (CM5 Rev 1.0,
+    7.0.6-edge-bcm2711) that the 1.0.8 overlay's RTC fragment targeted
+    the wrong pin namespace: my &rp1_i2c5_44_45 pinctrl group muxed
+    *RP1's internal* GPIO 44/45 as i2c5, but the Move's PCF85063 is
+    wired to the SODIMM "GPIO 44/45" carrier pins which on CM5 route
+    to BCM2712 SoC pads named emmc_dat5/emmc_dat6 (pin 44/45 in the
+    bcm2712 pinctrl namespace, NOT the RP1 one). Per the rpi-6.12.y
+    pinctrl driver (drivers/pinctrl/bcm/pinctrl-bcm2712.c) those pads
+    have zero I²C alt-functions:
+        PIN(44, vc_spi0, mtsif_alt, enet0, sd_card_a, mtsif_alt1,
+            arm_jtag, pdm, spi_m),
+        PIN(45, vc_spi0, mtsif_alt, enet0, sd_card_a, mtsif_alt1,
+            arm_jtag, pdm, spi_m),
+    The BCM2712 SODIMM pins that DO expose I²C (bsc_m3, alt5) are
+    GPIO 40/41 — physically different SODIMM pins. So the RTC is
+    hardware-unreachable on CM5 as currently wired; cutting/re-routing
+    the RTC traces to GPIO 40/41 is the only software-fixable path,
+    and it's a board mod. Until then the CM5 overlay ships SPI/ablspi
+    only and relies on NTP for time-of-day. ablspi itself works fine
+    on CM5 — /dev/ablspi0.0 appears, MoveLauncher binds the XMOS.
+    Full reasoning + the mod-path is documented in the .dts header.
+  * move-usb-gadget.service: two corrections so the unit cleanly
+    no-ops on CM5 (where dwc2 binding is currently blocked by an
+    Armbian kernel issue) instead of failing noisily.
+    - ConditionPathExists=/sys/class/udc -> ConditionPathExistsGlob=
+      /sys/class/udc/*. The bare PathExists check always passed
+      because /sys/class/udc is created by the gadget core regardless
+      of whether any UDC is registered; the glob match only fires
+      when an actual UDC node (e.g. 1000480000.usb) appears.
+    - Added Requires=sys-kernel-config.mount alongside the existing
+      After=. After= alone only orders; without Requires=, systemd
+      may start us anyway if nothing else pulled in the mount, and
+      the setup script's mkdir on /sys/kernel/config/usb_gadget/...
+      then EPERMs out.
+    Note: on CM5 the BCM2712-side dwc2 controller at /axi/usb@480000
+    stays deferred indefinitely because raspberrypi-clk fails to
+    probe at boot with -22, which blocks pm_genpd from powering the
+    USB domain. That's a kernel/firmware-driver issue and outside
+    the scope of move-bringup; the unit-condition change makes the
+    gadget service tolerate it rather than parade the failure.
+
+ -- Move Port <move-port@localhost>  Fri, 16 May 2026 14:30:00 +0000
+
 move-bringup (1.0.8-1) unstable; urgency=medium
 
   * ablspi-move-cm5.dts: rewrote against the actual CM5/RP1 topology

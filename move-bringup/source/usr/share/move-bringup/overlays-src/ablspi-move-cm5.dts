@@ -6,40 +6,72 @@
  * On CM5 the carrier-facing GPIO/SPI/I²C peripherals live on the RP1
  * southbridge (PCIe-attached), not on the BCM2712 SoC. The Pi firmware
  * and upstream rpi linux already expose RP1 controllers under stable DT
- * labels and pre-canned pinctrl groups, so the overlay reduces to:
+ * labels and pre-canned pinctrl groups, so the SPI/ablspi portion of
+ * the overlay reduces to:
  *
- *   1. &spi0 -> RP1 spi0 (/axi/pcie@.../rp1/spi@50000). CS0 is wired
- *      to physical SODIMM GPIO 8 in the base DTB's cs-gpios, matching
- *      CM4 BCM2711 spi0 — i.e. the XMOS is on the same physical CS pin
- *      and the ablspi-dkms driver binds cleanly via compatible="ablspi".
- *      &gpio -> RP1 gpio bank (/axi/pcie@.../rp1/gpio@d0000); the
- *      ablspi IRQ on physical GPIO 3 resolves to the same SODIMM pin
- *      as on CM4, so irq-gpios = <&gpio 3 0> is correct unchanged.
+ *   - &spi0 -> RP1 spi0 (/axi/pcie@.../rp1/spi@50000). CS0 is wired to
+ *     physical SODIMM GPIO 8 in the base DTB's cs-gpios, matching
+ *     CM4 BCM2711 spi0 — i.e. the XMOS is on the same physical CS pin
+ *     and the ablspi-dkms driver binds cleanly via compatible="ablspi".
+ *     &gpio -> RP1 gpio bank; ablspi IRQ on SODIMM GPIO 3 resolves to
+ *     the same physical pin as on CM4.
  *
- *   2. &spi0 chip-select 1 stays disabled.
+ *   - Verified on hardware: /dev/ablspi0.0 appears, MoveLauncher binds,
+ *     XMOS handshake completes. CM5 ablspi works equivalently to CM4.
  *
- *   3. PCF85063 RTC on the Move carrier's SODIMM GPIO 44/45 pins. On
- *      CM5/RP1 the 44/45 pin pair's I²C alt-function is i2c5 (not the
- *      BCM2711-era i2c0 the CM4 overlay uses). RP1 ships a pre-built
- *      pinctrl group `rp1_i2c5_44_45` with function="i2c5",
- *      pins="gpio44","gpio45", drive-strength=12mA, bias-pull-up — drop
- *      it in and we're done; no manual pin mux required.
+ * ──── RTC (PCF85063) is HARDWARE-INCOMPATIBLE with CM5 ────
  *
- * dwc2 / USB-OTG: not configured here. On CM5 the BCM2712-side USB
- * controller at /axi/usb@480000 is dwc2-compatible (compat string
- * "brcm,bcm2835-usb", status=disabled by default), and the stock
- * dwc2.dtbo's __fixups__ target the &usb label correctly. So
- * `dtoverlay=dwc2,dr_mode=otg` in /boot/firmware/config.txt does the
- * right thing on CM5. The Armbian/family default of dr_mode=host in the
- * [cm5] block must be stripped first (move-bringup.postinst + the
- * Armbian board hook handle that, mirroring the existing CM4
- * otg_mode=1 strip).
+ * No RTC fragment ships here on purpose. The Move's PCF85063 is hardwired
+ * on the carrier to the SODIMM pins originally labelled "GPIO 44/45".
+ * On CM4 (BCM2711) those SODIMM pins map to BCM2711 GPIO 44/45 which
+ * has I²C as an alt function (the CM4 overlay uses &i2c0if + pinctrl
+ * &i2c0_gpio44 and it works). On CM5 those same SODIMM pins map to
+ * BCM2712-internal pads named "emmc_dat5" / "emmc_dat6" (pin 44/45 in
+ * the bcm2712 pinctrl namespace) — and per the rpi-6.12.y/rpi-7.0.y
+ * kernel pinctrl driver (drivers/pinctrl/bcm/pinctrl-bcm2712.c), those
+ * pads have ZERO I²C alt-functions:
+ *
+ *     PIN(44, vc_spi0, mtsif_alt, enet0, sd_card_a, mtsif_alt1,
+ *         arm_jtag, pdm, spi_m),
+ *     PIN(45, vc_spi0, mtsif_alt, enet0, sd_card_a, mtsif_alt1,
+ *         arm_jtag, pdm, spi_m),
+ *
+ * The BCM2712 SODIMM pins that DO expose I²C (function bsc_m3, alt5)
+ * are GPIO 40/41 — physically different SODIMM pins from where the
+ * Move carrier traced the RTC. There is no software workaround; this
+ * is the same kind of hardware-level pin repurposing called out in
+ * §"CM4 ↔ CM5 differences" of the CM5 datasheet.
+ *
+ * Options for RTC on a CM5 Move:
+ *   (a) Hardware mod: cut the RTC SDA/SCL traces, jumper them to the
+ *       SODIMM pins that map to GPIO 40/41 on CM5, and add a fragment
+ *       targeting one of the BCM2712 i2c@7d005xxx nodes with pinctrl
+ *       on bcm2712 pins 40/41 in function bsc_m3.
+ *   (b) Live with no battery-backed RTC; rely on systemd-timesyncd /
+ *       chrony to sync time over WiFi/Ethernet at boot. Time-of-day is
+ *       lost across full power-off until the network comes up.
+ *
+ * The Move userspace tolerates option (b) — Set/UserData timestamps
+ * just walk forward from epoch until NTP corrects them. If you have a
+ * CM5 Move that needs persistent time-of-day, talk about option (a).
+ *
+ * ──── dwc2 / USB-OTG ────
+ *
+ * config.txt under [cm5] still ships `dtoverlay=dwc2,dr_mode=otg`.
+ * The BCM2712 dwc2 controller at /axi/usb@480000 has compatible
+ * "brcm,bcm2835-usb" so the stock dwc2.dtbo applies — BUT on the
+ * Armbian rpi-7.0.y kernel as built, dwc2 stays deferred indefinitely
+ * because the firmware-clock driver fails at boot (raspberrypi-clk
+ * soc@107c000000:firmware:clocks: probe ... -22), so pm_genpd can't
+ * power the USB controller (genpd_provider USB: Failed to set power
+ * to 1 (-22)). That's an Armbian-kernel-build issue, not a DT one;
+ * move-usb-gadget.service uses ConditionPathExistsGlob=/sys/class/udc/*
+ * so it cleanly no-ops on CM5 instead of failing noisily.
  *
  * Build:   dtc -@ -I dts -O dtb -o ablspi-move-cm5.dtbo ablspi-move-cm5.dts
  * Install: copy to /boot/firmware/overlays/ then add
  *              dtoverlay=ablspi-move-cm5
- *          to /boot/firmware/config.txt under [cm5]. Override examples:
- *              dtoverlay=ablspi-move-cm5,ablspi_max_hz=20000000
+ *          to /boot/firmware/config.txt under [cm5].
  */
 
 /dts-v1/;
@@ -81,8 +113,6 @@
 				 * Modern descriptor-based GPIO binding. &gpio
 				 * resolves to RP1's gpio controller; GPIO 3
 				 * is the same physical SODIMM pin as on CM4.
-				 * See ablspi-move-cm4.dts for the bare-int vs
-				 * descriptor rationale.
 				 */
 				irq-gpios = <&gpio 3 0>;
 			};
@@ -96,35 +126,7 @@
 		};
 	};
 
-	/*
-	 * PCF85063 RTC on RP1 i2c5 routed to GPIO 44/45 via the upstream
-	 * `rp1_i2c5_44_45` pinctrl group (function="i2c5", pins=44+45,
-	 * drive-strength=12mA, bias-pull-up — pre-canned in the CM5 base
-	 * DTB, no manual mux required). The RTC reads the BCM2711 carrier's
-	 * 44/45 pin pair on CM4 via BSC0; on CM5/RP1 those same physical
-	 * pins are reached via designware i2c5 instead. PCB-side: same two
-	 * traces, same chip, same address.
-	 */
-	fragment@2 {
-		target = <&i2c5>;
-		__overlay__ {
-			#address-cells = <1>;
-			#size-cells = <0>;
-			status = "okay";
-			pinctrl-names = "default";
-			pinctrl-0 = <&rp1_i2c5_44_45>;
-			clock-frequency = <100000>;
-
-			move_rtc: rtc@51 {
-				compatible = "nxp,pcf85063";
-				reg = <0x51>;
-				status = "okay";
-			};
-		};
-	};
-
 	__overrides__ {
 		ablspi_max_hz = <&ablspi>,"spi-max-frequency:0";
-		rtc_addr      = <&move_rtc>,"reg:0";
 	};
 };

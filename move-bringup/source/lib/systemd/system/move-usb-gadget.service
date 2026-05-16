@@ -1,10 +1,22 @@
 [Unit]
 Description=Ableton Move USB-Ethernet NCM gadget
 Documentation=https://www.kernel.org/doc/Documentation/usb/gadget_configfs.rst
+# Hard requires (not just After) on the configfs mount — the setup
+# script does `mkdir /sys/kernel/config/usb_gadget/...` which silently
+# fails if configfs isn't mounted yet. After= alone only orders; without
+# Requires= systemd may start us anyway if nothing pulled in the mount.
+Requires=sys-kernel-config.mount
 After=systemd-modules-load.service sys-kernel-config.mount
 Before=network-pre.target
 Wants=network-pre.target
-ConditionPathExists=/sys/class/udc
+# The existence of /sys/class/udc/ alone says nothing — that dir is
+# always present once the USB gadget core module loads, even if no UDC
+# is registered yet. Use a glob match so we only fire when an actual
+# UDC node (e.g. fe980000.usb / 1000480000.usb) appears. On CM5 with
+# the current Armbian rpi-7.0.y kernel, dwc2 stays deferred because the
+# firmware-clock driver fails to probe (-22), so this condition makes
+# the unit a clean no-op rather than a noisy failure on that platform.
+ConditionPathExistsGlob=/sys/class/udc/*
 
 [Service]
 Type=oneshot
