@@ -665,6 +665,26 @@ def _handle_archive_payload(entry: dict, workdir: str) -> str:
         log.error("tar extract failed: %s", r.stderr.decode('utf-8', errors='replace'))
         return "failure"
 
+    # If this archive ships rnbo runnercontent, sync the cache and pre-populated
+    # sqlite into Documents/rnbo/ now.  The vendor postinstall.sh has a
+    # [ ! -d Documents/rnbo ] guard that skips the copy on reinstalls, so we
+    # do it here before scripts run to ensure rnbomovecontrol finds the correct DB.
+    rnbo_rc  = os.path.join(dest, "rnbo", "share", "runnercontent", "rnbo")
+    rnbo_doc = os.path.join(dest, "Documents", "rnbo")
+    if os.path.isdir(rnbo_rc):
+        os.makedirs(rnbo_doc, exist_ok=True)
+        rc_cache  = rnbo_rc  + "/cache/"
+        doc_cache = rnbo_doc + "/cache/"
+        if os.path.isdir(rc_cache.rstrip("/")):
+            subprocess.run(["rsync", "-a", "--delete", rc_cache, doc_cache],
+                           capture_output=True)
+        rc_sqlite  = os.path.join(rnbo_rc,  "oscqueryrunner.sqlite")
+        dst_sqlite = os.path.join(rnbo_doc, "oscqueryrunner.sqlite")
+        if os.path.exists(rc_sqlite):
+            shutil.copy2(rc_sqlite, dst_sqlite)
+        subprocess.run(["chown", "-R", "ableton:users", rnbo_doc], capture_output=True)
+        log.info("rnbo: synced runnercontent/cache + sqlite → %s", rnbo_doc)
+
     subprocess.run(["chown", "-R", "ableton:users", dest], capture_output=True)
     log.info("archive extract done")
     return "success"

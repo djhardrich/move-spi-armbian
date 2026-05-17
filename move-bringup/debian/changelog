@@ -1,3 +1,16 @@
+move-bringup (1.0.23-1) unstable; urgency=medium
+
+  * move-swupdate-shim: after extracting an rnbo-move archive, rsync
+    runnercontent/rnbo/cache/ and copy the pre-populated oscqueryrunner.sqlite
+    into Documents/rnbo/ before postinstall scripts run.  The vendor
+    postinstall.sh has a [ ! -d Documents/rnbo ] guard that skips the copy
+    on reinstalls (once rnbomovecontrol has created the directory on first
+    boot); without this step the 73-patcher sqlite shipped in the swu never
+    reaches the path rnbomovecontrol reads, leaving 0 patchers registered and
+    no RNBO graphs visible.
+
+ -- Move Port <move-port@localhost>  Sun, 17 May 2026 00:00:00 +0000
+
 move-bringup (1.0.22-1) unstable; urgency=medium
 
   * Add D-Bus activation file for net.connman so the system bus
