@@ -300,9 +300,9 @@ passwd ableton
 
 **Skip this on CM4 — it doesn't apply and the tool will refuse.**
 
-A fresh CM5 ships with whatever second-stage bootloader RPi Foundation
+A fresh CM5 ships with whatever second-stage bootloader Ableton
 flashed to its onboard SPI EEPROM at the factory. That's typically
-from 2024 or earlier and too old to honor the kernel's firmware-
+from 2023 or earlier and too old to honor the kernel's firmware-
 mailbox calls for the BCM2712 USB power domain and the firmware-
 managed clock list. Symptoms if you skip this step:
 

@@ -1,0 +1,27 @@
+[Unit]
+Description=net.connman D-Bus shim backed by NetworkManager (Move WiFi UI compat)
+Documentation=https://github.com/local/move-bringup
+After=dbus.service NetworkManager.service
+Requires=dbus.service
+Wants=NetworkManager.service
+# MoveOriginal calls net.connman early in startup; bring us up before move-launcher.
+Before=move-launcher.service
+
+[Service]
+Type=dbus
+BusName=net.connman
+ExecStart=/usr/bin/python3 /usr/lib/move-bringup/move-connman-shim.py
+Restart=on-failure
+RestartSec=2s
+# Resource caps — script is small but defensive caps keep regressions cheap.
+MemoryMax=64M
+CPUWeight=20
+# No special privileges needed beyond D-Bus name ownership.
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+PrivateTmp=true
+ReadWritePaths=
+
+[Install]
+WantedBy=multi-user.target

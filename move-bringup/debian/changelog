@@ -1,3 +1,49 @@
+move-bringup (1.0.13-1) unstable; urgency=medium
+
+  * New: move-connman-shim — Python 3 daemon that owns the well-known
+    name `net.connman` on the system bus and proxies MoveOriginal's WiFi
+    UI calls to NetworkManager. Fixes the "WiFi screen shows nothing
+    useful" symptom on the Move LCD: MoveOriginal was written against
+    ConnMan and our Armbian image runs NetworkManager, so every
+    `net.connman.Manager / .Technology / .Service` call was failing
+    with ServiceUnknown and MoveOriginal's WiFi list / status was
+    empty.
+    The shim implements just enough of the ConnMan D-Bus surface to
+    satisfy what MoveOriginal actually calls (captured via dbus-monitor
+    on a live device): Manager.GetProperties / GetServices /
+    GetTechnologies / RegisterAgent / UnregisterAgent;
+    Technology[wifi].GetProperties / SetProperty / Scan;
+    Service[N].GetProperties / Connect / Disconnect / SetProperty.
+    Connect with PSK works end-to-end: shim calls MoveOriginal's agent
+    (well-known name com.ableton.move, path captured from
+    RegisterAgent) with Agent.RequestInput, then on response calls
+    NM.AddAndActivateConnection. Service paths use stock ConnMan
+    encoding (wifi_<bssid>_<ssidhex>_managed_<security>) so MoveOriginal
+    parses them correctly.
+    Signal-driven for low CPU — listens to NM Properties.PropertiesChanged
+    + Device.Wireless.AccessPointAdded/Removed and re-emits the
+    matching ConnMan signals (ServicesChanged, PropertyChanged). No
+    polling. Per-AP property cache invalidated only on NM signal.
+    Verified on hardware: 15 visible APs surfaced through GetServices
+    with correct security tags (psk vs ieee8021x), signal strength,
+    SSID; MoveLauncher registers its agent cleanly; resource use
+    ~26 MB RSS / <1% CPU idle / ~1s CPU per restart.
+  * Packaging:
+    - python3-dbus-next added to Depends.
+    - New file: /etc/dbus-1/system.d/move-connman-shim.conf granting
+      root the net.connman bus name + allowing all users to call into
+      our interfaces (MoveOriginal runs as ableton).
+    - New file: /lib/systemd/system/move-connman-shim.service —
+      Type=dbus, BusName=net.connman, ordered After=dbus +
+      NetworkManager and Before=move-launcher so MoveOriginal sees us
+      at its first net.connman call. MemoryMax=64M cap.
+    - postinst enables + starts the new service.
+  * The connman daemon itself is NOT installed; we provide just the
+    D-Bus surface. Avoids the two-network-manager interference issue
+    we hit with the connman-alongside-NM experiment.
+
+ -- Move Port <move-port@localhost>  Fri, 16 May 2026 20:00:00 +0000
+
 move-bringup (1.0.12-1) unstable; urgency=medium
 
   * setup-usb-network-gadget.sh: finally fix the USB-Ethernet NCM

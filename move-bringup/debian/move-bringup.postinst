@@ -145,7 +145,8 @@ case "$1" in
                      move-xmos-init.service \
                      move-launcher.service \
                      move-web.service \
-                     move-xmos-shutdown.service; do
+                     move-xmos-shutdown.service \
+                     move-connman-shim.service; do
                 systemctl enable "$u" >/dev/null 2>&1 || true
             done
 
@@ -157,6 +158,14 @@ case "$1" in
             # maintainer scripts. Enable + start now so it works without
             # a reboot.
             systemctl enable --now avahi-daemon.service >/dev/null 2>&1 || true
+
+            # move-connman-shim: tiny Python daemon that owns net.connman
+            # on the system bus and proxies MoveOriginal's WiFi UI calls
+            # to NetworkManager. Without this, the WiFi screen on the Move
+            # shows nothing useful (MoveOriginal expects ConnMan, which
+            # we don't run). Enable + start now so it works without a
+            # reboot. Idempotent.
+            systemctl enable --now move-connman-shim.service >/dev/null 2>&1 || true
         fi
 
         # Build + install the Move DT overlays into /boot/firmware/overlays/.
