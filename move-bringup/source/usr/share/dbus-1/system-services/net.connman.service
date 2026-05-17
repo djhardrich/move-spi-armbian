@@ -1,0 +1,5 @@
+[D-BUS Service]
+Name=net.connman
+Exec=/usr/bin/python3 /usr/lib/move-bringup/move-connman-shim.py
+User=root
+SystemdService=move-connman-shim.service

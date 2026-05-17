@@ -63,7 +63,7 @@ from typing import Optional
 from dbus_next import BusType, Variant
 from dbus_next.aio import MessageBus
 from dbus_next.service import ServiceInterface, method, signal as dbus_signal
-from dbus_next.errors import DBusError
+from dbus_next.errors import DBusError, InterfaceNotFoundError
 
 # ─── Logging ───────────────────────────────────────────────────────────
 log = logging.getLogger("move-connman-shim")
@@ -150,7 +150,7 @@ class NMFacade:
                 if t.value == NM_DEVICE_TYPE_WIFI:
                     self._wifi_dev_path = dev_path
                     return
-            except DBusError:
+            except (DBusError, InterfaceNotFoundError):
                 continue
         log.warning("no NM wifi device found")
 
@@ -191,10 +191,15 @@ class NMFacade:
     async def ap_properties(self, ap_path: str) -> dict:
         if ap_path in self._ap_cache:
             return self._ap_cache[ap_path]
-        intro = await self.bus.introspect(NM, ap_path)
-        obj = self.bus.get_proxy_object(NM, ap_path, intro)
-        p = obj.get_interface("org.freedesktop.DBus.Properties")
-        all_props = await p.call_get_all(NM + ".AccessPoint")
+        try:
+            intro = await self.bus.introspect(NM, ap_path)
+            obj = self.bus.get_proxy_object(NM, ap_path, intro)
+            p = obj.get_interface("org.freedesktop.DBus.Properties")
+            all_props = await p.call_get_all(NM + ".AccessPoint")
+        except (DBusError, InterfaceNotFoundError) as e:
+            # AP vanished between GetAccessPoints and here — return empty so caller skips it.
+            log.debug("ap_properties %s: %s (AP probably disappeared)", ap_path, e)
+            return {}
         # Unpack variants
         d = {k: v.value for k, v in all_props.items()}
         # SSID is ay (array of bytes); make it bytes

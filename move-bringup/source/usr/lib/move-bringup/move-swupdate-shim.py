@@ -141,6 +141,7 @@ async def _handle_control_client(
     reader: asyncio.StreamReader, writer: asyncio.StreamWriter
 ) -> None:
     """Receive .swu stream from Updater / MoveWebService."""
+    global _current_status, _current_pct
     try:
         hdr = await reader.readexactly(IPC_HDR_LEN)
     except asyncio.IncompleteReadError:
@@ -203,7 +204,6 @@ async def _handle_control_client(
     writer.close()
 
     loop = asyncio.get_running_loop()
-    global _current_status, _current_pct
     _current_status = STATUS_RUN
     _current_pct    = 0
 

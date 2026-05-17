@@ -37,7 +37,7 @@ ExecStartPre=+/usr/lib/move-bringup/rt-tune.sh
 
 ExecStart=/opt/move/MoveLauncher
 
-KillMode=process
+KillMode=mixed
 
 Restart=on-failure
 RestartSec=2s

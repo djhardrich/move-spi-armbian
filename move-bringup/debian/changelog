@@ -1,3 +1,22 @@
+move-bringup (1.0.22-1) unstable; urgency=medium
+
+  * Add D-Bus activation file for net.connman so the system bus
+    auto-activates move-connman-shim when MoveLauncher calls net.connman
+    at startup, eliminating the ServiceUnknown race that was causing the
+    WiFi UI to stall and potentially blocking MoveControlModeHandler init.
+  * move-launcher.service: KillMode=process -> KillMode=mixed so a service
+    restart sends SIGTERM/SIGKILL to all children (MoveControlModeHandler,
+    MoveMessageDisplay, etc.) rather than only the main process, preventing
+    orphan instances from fighting over /dev/ablspi0.0.
+  * move-connman-shim: catch InterfaceNotFoundError on AP property fetch
+    (AP can vanish between GetAccessPoints and property read; was crashing
+    the scan path with an unhandled exception).
+  * move-swupdate-shim: fix SyntaxError — global declaration for
+    _current_status/_current_pct must precede first use in function body;
+    Python 3.12 strictly enforces this; shim was crash-looping on every boot.
+
+ -- Move Port <move-port@localhost>  Sun, 17 May 2026 00:00:00 +0000
+
 move-bringup (1.0.21-1) unstable; urgency=medium
 
   * move-connman-shim.service: remove Before=move-launcher.service.
