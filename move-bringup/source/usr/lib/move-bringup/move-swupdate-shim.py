@@ -398,6 +398,77 @@ def _handle_raw_payload(entry: dict, workdir: str, progress=None, pct_start: int
     return result
 
 
+def _install_missing_libs(mntdir: str) -> None:
+    """Find libs that /opt/move/ binaries need but that are missing on the
+    running system, then copy them from the mounted firmware image.
+
+    This handles firmware updates that ship a library in a system path
+    (e.g. /usr/lib/) rather than /opt/move/lib/, which our rsync doesn't
+    cover. We only copy to /opt/move/lib/, never touching Armbian packages.
+    """
+    import glob as _glob
+
+    # Collect all executable files under /opt/move/
+    executables = []
+    for dirpath, _, filenames in os.walk("/opt/move"):
+        for fname in filenames:
+            fpath = os.path.join(dirpath, fname)
+            if os.access(fpath, os.X_OK):
+                executables.append(fpath)
+
+    if not executables:
+        return
+
+    # Run ldd on all of them at once; stderr carries "not a dynamic executable"
+    # warnings for scripts which we ignore.
+    missing: set = set()
+    try:
+        r = subprocess.run(["ldd", "--"] + executables, capture_output=True, text=True)
+        for line in r.stdout.splitlines():
+            m = re.match(r'\s+(\S+)\s+=>\s+not found', line)
+            if m:
+                missing.add(m.group(1))
+    except Exception as e:
+        log.debug("ldd scan error: %s", e)
+        return
+
+    if not missing:
+        log.debug("all libs resolved after update")
+        return
+
+    log.info("missing lib(s) after update: %s", " ".join(sorted(missing)))
+
+    search_roots = [
+        os.path.join(mntdir, "opt", "move", "lib"),
+        os.path.join(mntdir, "usr", "lib"),
+        os.path.join(mntdir, "usr", "lib", "aarch64-linux-gnu"),
+        os.path.join(mntdir, "lib"),
+        os.path.join(mntdir, "lib", "aarch64-linux-gnu"),
+    ]
+
+    os.makedirs("/opt/move/lib", exist_ok=True)
+
+    for libname in sorted(missing):
+        placed = False
+        for sdir in search_roots:
+            for candidate in sorted(_glob.glob(os.path.join(sdir, libname + "*"))):
+                if not os.path.isfile(candidate) or os.path.islink(candidate):
+                    continue
+                dest = os.path.join("/opt/move/lib", os.path.basename(candidate))
+                try:
+                    shutil.copy2(candidate, dest)
+                    log.info("installed %s ← %s", os.path.basename(candidate),
+                             os.path.relpath(candidate, mntdir))
+                    placed = True
+                    break
+                except Exception as e:
+                    log.warning("copy %s failed: %s", candidate, e)
+            if placed:
+                break
+        if not placed:
+            log.warning("lib %s not found in firmware image — may fail to launch", libname)
+
+
 def _rsync_from_mount(mntdir: str, progress=None, pct_start: int = 65, pct_end: int = 90) -> str:
     _p = progress or (lambda *_: None)
     result = "success"
@@ -418,6 +489,8 @@ def _rsync_from_mount(mntdir: str, progress=None, pct_start: int = 65, pct_end: 
             log.error("rsync /opt/move/ failed: %s", r.stderr.decode())
             result = "failure"
         else:
+            _p(pct_start + int((pct_end - pct_start) * 0.35), "resolving libs")
+            _install_missing_libs(mntdir)
             subprocess.run(["ldconfig"], capture_output=True)
             log.info("rsync /opt/move/ done")
 

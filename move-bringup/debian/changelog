@@ -1,3 +1,15 @@
+move-bringup (1.0.17-1) unstable; urgency=medium
+
+  * move-swupdate-shim: add _install_missing_libs — after /opt/move/
+    rsync, run ldd on all installed binaries, find "not found" libs in
+    the mounted firmware ext4 (searches /opt/move/lib, /usr/lib,
+    /usr/lib/aarch64-linux-gnu, /lib, /lib/aarch64-linux-gnu), and copy
+    only the missing ones to /opt/move/lib/. Fixes firmware updates that
+    move vendor libs from /opt/move/lib/ to system paths without us
+    touching Armbian's own packages.
+
+ -- Move Port <move-port@localhost>  Sun, 17 May 2026 00:00:00 +0000
+
 move-bringup (1.0.16-1) unstable; urgency=medium
 
   * move-swupdate-shim: emit STATUS_RUN progress messages during CPIO
