@@ -19,6 +19,12 @@ HIDDEN="false"
 # shellcheck source=/dev/null
 . "$CFG"
 
+# Strip CR in case the file was saved on Windows/macOS with CRLF endings.
+SSID=$(printf '%s' "$SSID" | tr -d '\r')
+PSK=$(printf '%s'  "$PSK"  | tr -d '\r')
+COUNTRY=$(printf '%s' "$COUNTRY" | tr -d '\r')
+HIDDEN=$(printf '%s'  "$HIDDEN"  | tr -d '\r')
+
 if [ -z "$SSID" ] || [ -z "$PSK" ]; then
     echo "firstboot-wifi: SSID or PSK empty in $CFG; aborting" >&2
     exit 1
