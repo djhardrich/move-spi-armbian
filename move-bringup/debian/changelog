@@ -1,3 +1,28 @@
+move-bringup (1.0.12-1) unstable; urgency=medium
+
+  * setup-usb-network-gadget.sh: finally fix the USB-Ethernet NCM
+    gadget. The 1.0.10 fixes (modules-load.d + idempotent stop) were
+    necessary but not sufficient — the script's two `ln -sf "../...`
+    invocations were silently failing because **configfs parses
+    symlink targets to identify the referenced function/config and
+    rejects any path with `..` traversal with ENOENT**, even though
+    the path resolves correctly at the filesystem level. Verified on
+    hardware (CM4 Rev 1.1, kernel 6.18.29-current-bcm2711): switching
+    both ln calls from `-sf "../../functions/ncm.usb0" "configs/c.1/"`
+    style to `-s "functions/ncm.usb0" "configs/c.1/"` style (paths
+    relative to the gadget root, since cwd is g1/) makes ln succeed,
+    UDC bind succeeds, /sys/class/udc/<udc> shows the bound gadget,
+    and usb0 interface appears with the configured host/dev MACs:
+        configfs-gadget.g1 gadget.0: HOST MAC 02:00:00:00:00:00
+        configfs-gadget.g1 gadget.0: MAC 02:00:00:00:00:01
+        dwc2 fe980000.usb: bound driver configfs-gadget.g1
+    The path-form requirement matches what
+    Documentation/usb/gadget_configfs.rst uses in its examples.
+    Removed -f flag too — now redundant since stop() runs first as
+    part of start() (per 1.0.10).
+
+ -- Move Port <move-port@localhost>  Fri, 16 May 2026 19:00:00 +0000
+
 move-bringup (1.0.11-1) unstable; urgency=medium
 
   * Build fix: move rpi-eeprom + libraspberrypi-bin out of

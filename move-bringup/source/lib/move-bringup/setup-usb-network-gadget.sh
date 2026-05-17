@@ -74,7 +74,17 @@ create_ncm_function() {
     printf "%s\n" "$host_addr" > "functions/$INSTANCE_NAME/host_addr"
     printf "%s\n" "$dev_addr"  > "functions/$INSTANCE_NAME/dev_addr"
 
-    ln -sf "../../functions/$INSTANCE_NAME" "configs/$CONFIG/"
+    # Path-form matters here: configfs PARSES the symlink target to
+    # identify which function instance to associate with this config,
+    # and it does NOT accept paths with `..` traversal (returns ENOENT
+    # from the kernel even though the path resolves to a real configfs
+    # node at the filesystem level). The accepted form is paths
+    # relative to the gadget root (cwd is g1/, so "functions/ncm.usb0"
+    # is correct). The old `-sf "../../functions/ncm.usb0" "configs/c.1/"`
+    # form was broken silently on the older kernels too — recent
+    # kernels just surface it as ENOENT. The matching kernel doc is
+    # Documentation/usb/gadget_configfs.rst which uses this same form.
+    ln -s "functions/$INSTANCE_NAME" "configs/$CONFIG/"
 }
 
 create_os_descriptor() {
@@ -83,7 +93,9 @@ create_os_descriptor() {
     printf "1\n"       > os_desc/use
     printf "0x1\n"     > os_desc/b_vendor_code
     printf "MSFT100\n" > os_desc/qw_sign
-    ln -sf "../configs/$CONFIG" os_desc/
+    # Same path-form rule as the function symlink above: configfs
+    # rejects `../` traversal in os_desc symlink targets too.
+    ln -s "configs/$CONFIG" os_desc/
 
     mkdir -p "functions/$INSTANCE_NAME/os_desc/interface.ncm"
     printf "WINNCM\n" > "functions/$INSTANCE_NAME/os_desc/interface.ncm/compatible_id"
