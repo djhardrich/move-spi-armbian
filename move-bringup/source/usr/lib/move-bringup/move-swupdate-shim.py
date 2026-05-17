@@ -43,6 +43,7 @@ IPC_MAGIC_PROGRESS = 0x26011982
 _PROGRESS_FMT = "<IIIQIII256s64sII2048s"
 assert struct.calcsize(_PROGRESS_FMT) == 2408
 
+STATUS_RUN     = 2
 STATUS_SUCCESS = 3
 STATUS_FAILURE = 4
 
@@ -50,26 +51,32 @@ STATUS_FAILURE = 4
 _progress_clients: list[asyncio.StreamWriter] = []
 
 
-def build_progress_msg(status: int, dwl_bytes: int = 0) -> bytes:
+def build_progress_msg(
+    status: int,
+    dwl_bytes: int = 0,
+    cur_pct: int = 0,
+    cur_image: str = "move-swupdate-shim",
+) -> bytes:
+    img_b = (cur_image.encode()[:255] + b"\x00").ljust(256, b"\x00")
+    pct = 100 if status == STATUS_SUCCESS else cur_pct
     return struct.pack(
         _PROGRESS_FMT,
-        IPC_MAGIC_PROGRESS,                          # magic
-        status,                                       # status
-        100 if status == STATUS_SUCCESS else 0,       # dwl_percent
-        dwl_bytes,                                    # dwl_bytes (uint64)
-        1,                                            # nsteps
-        1,                                            # cur_step
-        100 if status == STATUS_SUCCESS else 0,       # cur_percent
-        b"move-swupdate-shim\x00",                   # cur_image[256]
-        b"file\x00",                                  # hnd_name[64]
-        0,                                            # source
-        0,                                            # infolen
-        b"\x00" * 2048,                              # info[2048]
+        IPC_MAGIC_PROGRESS,  # magic
+        status,              # status
+        pct,                 # dwl_percent
+        dwl_bytes,           # dwl_bytes (uint64)
+        1,                   # nsteps
+        1,                   # cur_step
+        pct,                 # cur_percent
+        img_b,               # cur_image[256]
+        b"file\x00",         # hnd_name[64]
+        0,                   # source
+        0,                   # infolen
+        b"\x00" * 2048,      # info[2048]
     )
 
 
-async def _notify_progress(status: int, dwl_bytes: int = 0) -> None:
-    msg = build_progress_msg(status, dwl_bytes)
+async def _notify_raw(msg: bytes) -> None:
     dead = []
     for w in _progress_clients:
         try:
@@ -79,6 +86,10 @@ async def _notify_progress(status: int, dwl_bytes: int = 0) -> None:
             dead.append(w)
     for w in dead:
         _progress_clients.remove(w)
+
+
+async def _notify_progress(status: int, dwl_bytes: int = 0, cur_pct: int = 0) -> None:
+    await _notify_raw(build_progress_msg(status, dwl_bytes, cur_pct))
 
 
 # ── progress socket handler ───────────────────────────────────────────────
@@ -178,8 +189,15 @@ async def _handle_control_client(
     log.info("control: received %d bytes → %s", total, tmp_path)
     writer.close()
 
-    result = await asyncio.get_running_loop().run_in_executor(
-        None, process_swu, tmp_path
+    loop = asyncio.get_running_loop()
+
+    def _progress_cb(pct: int, label: str = "installing") -> None:
+        """Thread-safe progress update from the sync processing thread."""
+        msg = build_progress_msg(STATUS_RUN, cur_pct=pct, cur_image=label)
+        asyncio.run_coroutine_threadsafe(_notify_raw(msg), loop)
+
+    result = await loop.run_in_executor(
+        None, lambda: process_swu(tmp_path, _progress_cb)
     )
     status = STATUS_SUCCESS if result == "success" else STATUS_FAILURE
     await _notify_progress(status, total)
@@ -188,6 +206,19 @@ async def _handle_control_client(
         os.unlink(tmp_path)
     except OSError:
         pass
+
+    if result == "success":
+        # Give MoveWebService 5 s to process the success notification and
+        # send its HTTP 200 to the browser before we restart anything.
+        await asyncio.sleep(5)
+        log.info("restarting move-launcher.service ...")
+        proc = await asyncio.create_subprocess_exec(
+            "systemctl", "try-restart", "move-launcher.service",
+            stdout=asyncio.subprocess.DEVNULL,
+            stderr=asyncio.subprocess.DEVNULL,
+        )
+        await proc.wait()
+        log.info("move-launcher.service restarted")
 
 
 KEY_FILE = "/etc/move-swupdate/symmetrickey"
@@ -319,7 +350,8 @@ def _verify_rsa_signature(sw_desc_path: str, sig_path: str, pubkey_path: str) ->
         return False
 
 
-def _handle_raw_payload(entry: dict, workdir: str) -> str:
+def _handle_raw_payload(entry: dict, workdir: str, progress=None, pct_start: int = 40, pct_end: int = 90) -> str:
+    _p = progress or (lambda *_: None)
     filename = entry["filename"]
     src = _safe_workdir_path(workdir, filename)
     if src is None:
@@ -344,6 +376,7 @@ def _handle_raw_payload(entry: dict, workdir: str) -> str:
         src = base
 
     mntdir = tempfile.mkdtemp(prefix="move-swu-mnt-")
+    _p(pct_start + int((pct_end - pct_start) * 0.3), "mounting")
     try:
         r = subprocess.run(
             ["mount", "-o", "ro,loop", src, mntdir],
@@ -353,7 +386,7 @@ def _handle_raw_payload(entry: dict, workdir: str) -> str:
             log.error("mount failed: %s", r.stderr.decode())
             return "failure"
         try:
-            result = _rsync_from_mount(mntdir)
+            result = _rsync_from_mount(mntdir, _p, pct_start + int((pct_end - pct_start) * 0.5), pct_end)
         finally:
             subprocess.run(["umount", mntdir], capture_output=True)
     finally:
@@ -365,15 +398,20 @@ def _handle_raw_payload(entry: dict, workdir: str) -> str:
     return result
 
 
-def _rsync_from_mount(mntdir: str) -> str:
+def _rsync_from_mount(mntdir: str, progress=None, pct_start: int = 65, pct_end: int = 90) -> str:
+    _p = progress or (lambda *_: None)
     result = "success"
 
     opt_src = os.path.join(mntdir, "opt", "move") + "/"
     if os.path.isdir(opt_src):
+        _p(pct_start, "syncing /opt/move")
         log.info("rsyncing /opt/move/ ...")
         r = subprocess.run([
             "rsync", "-aHAX", "--delete",
             "--exclude=log/", "--exclude=*.log",
+            # Protect lib/ from deletion: firmware updates may not ship
+            # /opt/move/lib/ but vendor .so files there are still needed.
+            "--filter=P lib/",
             opt_src, "/opt/move/",
         ], capture_output=True)
         if r.returncode != 0:
@@ -385,6 +423,7 @@ def _rsync_from_mount(mntdir: str) -> str:
 
     data_src = os.path.join(mntdir, "data") + "/"
     if os.path.isdir(data_src) and os.listdir(data_src):
+        _p(pct_start + int((pct_end - pct_start) * 0.5), "syncing /data")
         log.info("rsyncing /data/ → /var/lib/move-data/ ...")
         r = subprocess.run([
             "rsync", "-aHAX",
@@ -463,11 +502,11 @@ def _handle_archive_payload(entry: dict, workdir: str) -> str:
     return "success"
 
 
-def process_swu(path: str) -> str:
+def process_swu(path: str, progress=None) -> str:
     """Process a .swu file. Returns 'success' or 'failure'."""
     workdir = tempfile.mkdtemp(prefix="move-swu-")
     try:
-        return _process_swu_inner(path, workdir)
+        return _process_swu_inner(path, workdir, progress or (lambda *_: None))
     except Exception as e:
         log.exception("process_swu unhandled exception: %s", e)
         return "failure"
@@ -475,8 +514,9 @@ def process_swu(path: str) -> str:
         shutil.rmtree(workdir, ignore_errors=True)
 
 
-def _process_swu_inner(path: str, workdir: str) -> str:
+def _process_swu_inner(path: str, workdir: str, progress) -> str:
     # 1. CPIO extract
+    progress(5, "extracting")
     log.info("extracting CPIO from %s", path)
     with open(path, "rb") as f:
         r = subprocess.run(
@@ -500,6 +540,7 @@ def _process_swu_inner(path: str, workdir: str) -> str:
         return "failure"
 
     # 2. Signature verification (permissive)
+    progress(20, "verifying")
     sig_path = os.path.join(workdir, "sw-description.sig")
     if os.path.exists(sig_path) and os.path.exists(PUBKEY_FILE):
         ok = _verify_rsa_signature(sw_desc_path, sig_path, PUBKEY_FILE)
@@ -526,6 +567,7 @@ def _process_swu_inner(path: str, workdir: str) -> str:
              desc["version"], len(desc["files"]), len(desc["scripts"]))
 
     # 4. SHA-256 verify all payloads
+    progress(30, "verifying")
     for entry in desc["files"] + desc["scripts"]:
         if not entry["sha256"]:
             continue
@@ -545,13 +587,17 @@ def _process_swu_inner(path: str, workdir: str) -> str:
             return "failure"
         log.debug("sha256 OK: %s", entry["filename"])
 
-    # 5. Dispatch by type
+    # 5. Dispatch by type — allocate progress range 40-90 across payloads
+    n_files = max(len(desc["files"]), 1)
     result = "success"
-    for entry in desc["files"]:
+    for i, entry in enumerate(desc["files"]):
+        pct = 40 + int(50 * i / n_files)
         ptype = entry["type"]
         if ptype in ("raw", "rawfile"):
-            r2 = _handle_raw_payload(entry, workdir)
+            progress(pct, "installing")
+            r2 = _handle_raw_payload(entry, workdir, progress, pct, pct + int(50 / n_files))
         elif ptype == "archive":
+            progress(pct, "installing")
             r2 = _handle_archive_payload(entry, workdir)
         else:
             log.warning("unknown payload type %r — skipping", ptype)
@@ -562,17 +608,9 @@ def _process_swu_inner(path: str, workdir: str) -> str:
     # 6. Scripts: Ableton's postinstall scripts expect swupdate's A/B partition
     # environment (U-Boot env vars, specific mount layout). Skip execution on
     # Armbian — the payload files themselves are what matters.
+    progress(95, "finalizing")
     for s in desc["scripts"]:
         log.info("skipping script %s (not applicable on Armbian)", s["filename"])
-
-    # 7. Restart launcher
-    if result == "success":
-        log.info("restarting move-launcher + move-web ...")
-        subprocess.run(
-            ["systemctl", "try-restart",
-             "move-launcher.service", "move-web.service"],
-            capture_output=True
-        )
 
     log.info("process_swu result: %s", result)
     return result

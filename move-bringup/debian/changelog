@@ -1,3 +1,18 @@
+move-bringup (1.0.16-1) unstable; urgency=medium
+
+  * move-swupdate-shim: emit STATUS_RUN progress messages during CPIO
+    extract, signature verify, payload decrypt, mount, rsync, and
+    finalize — Installing bar now tracks actual install work instead of
+    freezing after .swu transfer.
+  * move-swupdate-shim: defer move-launcher.service restart to 5 s after
+    success progress notification so MoveWebService can respond 200 to
+    the browser before the restart; remove move-web.service from restart.
+  * move-swupdate-shim: protect /opt/move/lib/ from --delete during rsync
+    so vendor .so files survive firmware updates that restructure the lib
+    layout (fixes libXSDBusCpp.so being wiped by 2.0.5b1 update).
+
+ -- Move Port <move-port@localhost>  Sun, 17 May 2026 00:00:00 +0000
+
 move-bringup (1.0.15-1) unstable; urgency=medium
 
   * move-swupdate-shim: fix encrypted payload detection — fall back to
