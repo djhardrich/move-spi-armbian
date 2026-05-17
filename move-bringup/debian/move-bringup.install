@@ -30,3 +30,4 @@ source/lib/move-bringup/xmos-power-cycle.sh           usr/lib/move-bringup
 source/lib/move-bringup/firstboot-wifi.sh             usr/lib/move-bringup
 source/lib/systemd/system/move-firstboot-wifi.service lib/systemd/system
 source/usr/share/move-bringup/move-wifi.txt.example   usr/share/move-bringup
+source/etc/NetworkManager/system-connections/move-usb-gadget.nmconnection  etc/NetworkManager/system-connections

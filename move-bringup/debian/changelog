@@ -1,3 +1,18 @@
+move-bringup (1.0.19-1) unstable; urgency=medium
+
+  * postinst: disable NetworkManager-wait-online.service so Move
+    always boots to the launcher regardless of WiFi/network state.
+    Move is an embedded device, not a server; network-online.target
+    should never gate the boot sequence.
+  * Add NetworkManager keyfile for usb0 (192.168.5.1/24, static,
+    never-default) so the USB NCM gadget always gets a predictable
+    IP. Connect host interface to 192.168.5.x to reach the device
+    via SSH without WiFi.
+  * postinst: chmod 600 the NM keyfile (NM ignores world-readable
+    keyfiles).
+
+ -- Move Port <move-port@localhost>  Sun, 17 May 2026 00:00:00 +0000
+
 move-bringup (1.0.18-1) unstable; urgency=medium
 
   * move-swupdate-shim: stream decrypt+gunzip through a single Popen

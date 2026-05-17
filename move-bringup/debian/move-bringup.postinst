@@ -177,6 +177,19 @@ case "$1" in
             /etc/kernel/postinst.d/move-overlays || true
         fi
 
+        # NM keyfiles must be root-only or NM ignores them.
+        chmod 600 /etc/NetworkManager/system-connections/move-usb-gadget.nmconnection \
+            2>/dev/null || true
+
+        # Move does not require network connectivity to launch — disable
+        # NetworkManager-wait-online so the boot sequence never hangs
+        # waiting for WiFi (or any other interface) to be fully online.
+        # The usb0 static-IP keyfile above ensures USB access is always
+        # available; WiFi is fully optional.
+        if [ -d /run/systemd/system ]; then
+            systemctl disable NetworkManager-wait-online.service >/dev/null 2>&1 || true
+        fi
+
         # Stage the WiFi credentials template on the FAT boot partition
         # so the operator can populate it before first boot. The
         # firstboot-wifi service reads it, writes an NM keyfile, then
