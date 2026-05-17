@@ -1,3 +1,20 @@
+move-bringup (1.0.18-1) unstable; urgency=medium
+
+  * move-swupdate-shim: stream decrypt+gunzip through a single Popen
+    pipeline for .enc+.gz raw payloads — eliminates the ~650 MB
+    intermediate .gz file entirely, keeping peak disk/RAM use well
+    within stock 2 GB device limits.
+  * move-swupdate-shim: delete the .swu file immediately after CPIO
+    extraction (frees ~670 MB before the ext4 decompression step).
+  * move-swupdate-shim: drop kernel page cache (drop_caches=1) after
+    umount to release the ~2 GB of ext4 image pages from page cache.
+  * move-swupdate-shim: serve current status + pct to progress clients
+    on connect and in command-3 (ipc_get_status) responses, so the
+    on-screen "Updating" percentage reflects live install progress
+    rather than staying at 0%.
+
+ -- Move Port <move-port@localhost>  Sun, 17 May 2026 00:00:00 +0000
+
 move-bringup (1.0.17-1) unstable; urgency=medium
 
   * move-swupdate-shim: add _install_missing_libs — after /opt/move/

@@ -50,6 +50,11 @@ STATUS_FAILURE = 4
 # Registered progress clients (ipc_wait_for_complete creates a new connection)
 _progress_clients: list[asyncio.StreamWriter] = []
 
+# Current update state — read by the progress socket on-connect and by
+# command-3 (ipc_get_status) responses so late-connecting clients see live pct.
+_current_status: int = STATUS_SUCCESS
+_current_pct:    int = 0
+
 
 def build_progress_msg(
     status: int,
@@ -100,6 +105,13 @@ async def _handle_progress_client(
     """Hold the connection open; write progress_msg when updates happen."""
     log.debug("progress client connected")
     _progress_clients.append(writer)
+    # Immediately deliver current state so clients that connect mid-update
+    # see the live percentage instead of being stuck at 0%.
+    try:
+        writer.write(build_progress_msg(_current_status, cur_pct=_current_pct))
+        await writer.drain()
+    except Exception:
+        pass
     try:
         # Block until the client disconnects (EOF / error)
         await reader.read(-1)
@@ -141,15 +153,16 @@ async def _handle_control_client(
         return
 
     if command != CMD_ACTIVATION:
-        # Other commands (e.g. ipc_get_status) use the same 3120-byte exchange.
-        # Drain the struct body and send back an idle-success response.
-        log.debug("control: command %d — draining and acking", command)
+        # ipc_get_status() and similar: drain + reply with current progress.
+        log.debug("control: command %d — draining and acking (pct=%d)", command, _current_pct)
         try:
             await reader.readexactly(IPC_MSG_SIZE - IPC_HDR_LEN)
         except asyncio.IncompleteReadError:
             pass
         response = bytearray(IPC_MSG_SIZE)
-        struct.pack_into("<I", response, 4, 1)
+        struct.pack_into("<I", response, 4, 1)                # ACCEPT
+        struct.pack_into("<I", response, 8, _current_status)  # current status
+        struct.pack_into("<I", response, 12, _current_pct)    # current pct
         writer.write(bytes(response))
         await writer.drain()
         writer.close()
@@ -190,9 +203,14 @@ async def _handle_control_client(
     writer.close()
 
     loop = asyncio.get_running_loop()
+    global _current_status, _current_pct
+    _current_status = STATUS_RUN
+    _current_pct    = 0
 
     def _progress_cb(pct: int, label: str = "installing") -> None:
         """Thread-safe progress update from the sync processing thread."""
+        global _current_pct
+        _current_pct = pct
         msg = build_progress_msg(STATUS_RUN, cur_pct=pct, cur_image=label)
         asyncio.run_coroutine_threadsafe(_notify_raw(msg), loop)
 
@@ -200,6 +218,8 @@ async def _handle_control_client(
         None, lambda: process_swu(tmp_path, _progress_cb)
     )
     status = STATUS_SUCCESS if result == "success" else STATUS_FAILURE
+    _current_status = status
+    _current_pct    = 100 if status == STATUS_SUCCESS else _current_pct
     await _notify_progress(status, total)
 
     try:
@@ -359,21 +379,46 @@ def _handle_raw_payload(entry: dict, workdir: str, progress=None, pct_start: int
         return "failure"
 
     if entry["encrypted"] or filename.endswith(".enc"):
-        dec = src[:-4] if src.endswith(".enc") else src + ".dec"
-        err = _aes_decrypt(src, dec)
-        if err:
-            log.error("raw payload decrypt failed: %s", err)
-            return "failure"
-        src = dec
+        enc_src = src
+        dec_name = src[:-4] if src.endswith(".enc") else src + ".dec"
+        if dec_name.endswith(".gz"):
+            # Decrypt + decompress in one pipeline — never writes .gz to disk
+            # (saves ~650 MB on constrained devices).
+            final = dec_name[:-3]
+            log.info("decrypt+gunzip pipeline: %s → %s",
+                     os.path.basename(enc_src), os.path.basename(final))
+            err = _aes_decrypt_gunzip(enc_src, final)
+            if err:
+                log.error("raw payload decrypt+gunzip failed: %s", err)
+                return "failure"
+            src = final
+        else:
+            err = _aes_decrypt(enc_src, dec_name)
+            if err:
+                log.error("raw payload decrypt failed: %s", err)
+                return "failure"
+            src = dec_name
+            if src.endswith(".gz"):
+                base = src[:-3]
+                r = subprocess.run(["gunzip", "-f", src], capture_output=True)
+                if r.returncode != 0:
+                    log.error("gunzip failed: %s", r.stderr.decode())
+                    return "failure"
+                src = base
+        # Free encrypted source now that we have the decompressed output
+        try:
+            os.unlink(enc_src)
+        except OSError:
+            pass
         log.info("decrypted → %s", os.path.basename(src))
-
-    if src.endswith(".gz"):
-        base = src[:-3]
-        r = subprocess.run(["gunzip", "-f", src], capture_output=True)
-        if r.returncode != 0:
-            log.error("gunzip failed: %s", r.stderr.decode())
-            return "failure"
-        src = base
+    else:
+        if src.endswith(".gz"):
+            base = src[:-3]
+            r = subprocess.run(["gunzip", "-f", src], capture_output=True)
+            if r.returncode != 0:
+                log.error("gunzip failed: %s", r.stderr.decode())
+                return "failure"
+            src = base
 
     mntdir = tempfile.mkdtemp(prefix="move-swu-mnt-")
     _p(pct_start + int((pct_end - pct_start) * 0.3), "mounting")
@@ -389,6 +434,10 @@ def _handle_raw_payload(entry: dict, workdir: str, progress=None, pct_start: int
             result = _rsync_from_mount(mntdir, _p, pct_start + int((pct_end - pct_start) * 0.5), pct_end)
         finally:
             subprocess.run(["umount", mntdir], capture_output=True)
+            try:
+                open("/proc/sys/vm/drop_caches", "w").write("1\n")
+            except OSError:
+                pass
     finally:
         try:
             os.rmdir(mntdir)
@@ -515,15 +564,23 @@ def _rsync_from_mount(mntdir: str, progress=None, pct_start: int = 65, pct_end: 
     return result
 
 
-def _aes_decrypt(src: str, dst: str) -> "str | None":
-    """Decrypt src → dst with key from KEY_FILE. Returns error string or None."""
+def _read_aes_key() -> "tuple[str,str] | str":
+    """Return (key_hex, iv_hex) or an error string."""
     if not os.path.exists(KEY_FILE):
         return f"AES key file not found: {KEY_FILE}"
     with open(KEY_FILE) as kf:
         parts = kf.read().strip().split()
     if len(parts) < 2:
         return f"bad key file format: {KEY_FILE}"
-    key_hex, iv_hex = parts[0], parts[1]
+    return parts[0], parts[1]
+
+
+def _aes_decrypt(src: str, dst: str) -> "str | None":
+    """Decrypt src → dst with key from KEY_FILE. Returns error string or None."""
+    k = _read_aes_key()
+    if isinstance(k, str):
+        return k
+    key_hex, iv_hex = k
     r = subprocess.run(
         ["openssl", "enc", "-d", "-aes-256-cbc",
          "-K", key_hex, "-iv", iv_hex, "-nosalt",
@@ -532,6 +589,34 @@ def _aes_decrypt(src: str, dst: str) -> "str | None":
     )
     if r.returncode != 0:
         return f"openssl decrypt failed: {r.stderr.decode('utf-8', errors='replace').strip()}"
+    return None
+
+
+def _aes_decrypt_gunzip(src: str, dst: str) -> "str | None":
+    """Decrypt src and decompress through gunzip in one pipeline → dst.
+    Avoids materialising the intermediate .gz on disk at all.
+    Returns error string or None."""
+    k = _read_aes_key()
+    if isinstance(k, str):
+        return k
+    key_hex, iv_hex = k
+    with open(dst, "wb") as out_f:
+        dec = subprocess.Popen(
+            ["openssl", "enc", "-d", "-aes-256-cbc",
+             "-K", key_hex, "-iv", iv_hex, "-nosalt", "-in", src],
+            stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+        )
+        gz = subprocess.Popen(
+            ["gunzip", "-c"],
+            stdin=dec.stdout, stdout=out_f, stderr=subprocess.PIPE,
+        )
+        dec.stdout.close()
+        _, gz_err  = gz.communicate()
+        _, dec_err = dec.communicate()
+    if dec.returncode != 0:
+        return f"openssl decrypt failed: {dec_err.decode('utf-8', errors='replace').strip()}"
+    if gz.returncode != 0:
+        return f"gunzip failed: {gz_err.decode('utf-8', errors='replace').strip()}"
     return None
 
 
@@ -611,6 +696,14 @@ def _process_swu_inner(path: str, workdir: str, progress) -> str:
     if not os.path.exists(sw_desc_path):
         log.error("sw-description not found in .swu")
         return "failure"
+
+    # CPIO extraction done — delete the .swu now to free ~670 MB before the
+    # decrypt+decompress step materialises the ext4 image (~2 GB).
+    try:
+        os.unlink(path)
+        log.debug("deleted .swu after CPIO extract")
+    except OSError:
+        pass
 
     # 2. Signature verification (permissive)
     progress(20, "verifying")
