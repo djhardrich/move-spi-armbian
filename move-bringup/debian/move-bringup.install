@@ -17,8 +17,12 @@ source/lib/systemd/system/move-usb-gadget.service     lib/systemd/system
 source/lib/systemd/system/move-xmos-shutdown.service  lib/systemd/system
 source/lib/systemd/system/move-xmos-init.service      lib/systemd/system
 source/lib/systemd/system/data.mount                  lib/systemd/system
-source/lib/systemd/system/swupdateprog-stub.service   lib/systemd/system
-source/lib/move-bringup/swupdateprog-stub.py          usr/lib/move-bringup
+source/lib/systemd/system/move-swupdate-shim.service  lib/systemd/system
+source/usr/lib/move-bringup/move-swupdate-shim.py     usr/lib/move-bringup
+source/lib/systemd/system/move-update-dbus.service    lib/systemd/system
+source/usr/lib/move-bringup/move-update-dbus.py       usr/lib/move-bringup
+source/usr/lib/move-bringup/move-update-check.sh      usr/lib/move-bringup
+source/etc/move-swupdate/channel                      etc/move-swupdate
 source/lib/move-bringup/rt-tune.sh                    usr/lib/move-bringup
 source/lib/move-bringup/setup-usb-network-gadget.sh   usr/lib/move-bringup
 source/lib/move-bringup/xmos-power-off.sh             usr/lib/move-bringup

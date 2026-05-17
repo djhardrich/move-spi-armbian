@@ -1,8 +1,8 @@
 [Unit]
 Description=Ableton Move launcher
 Documentation=https://github.com/local/move-bringup
-After=systemd-modules-load.service dbus.service move-usb-gadget.service move-xmos-init.service data.mount swupdateprog-stub.service
-Wants=move-usb-gadget.service move-xmos-init.service swupdateprog-stub.service
+After=systemd-modules-load.service dbus.service move-usb-gadget.service move-xmos-init.service data.mount move-swupdate-shim.service
+Wants=move-usb-gadget.service move-xmos-init.service move-swupdate-shim.service
 Requires=dbus.service data.mount
 ConditionPathExists=/opt/move/MoveLauncher
 ConditionPathExists=/dev/ablspi0.0

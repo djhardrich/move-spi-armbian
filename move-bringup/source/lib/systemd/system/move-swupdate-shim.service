@@ -1,0 +1,16 @@
+[Unit]
+Description=swupdate socket shim for Ableton Move
+DefaultDependencies=no
+After=local-fs.target
+Before=move-launcher.service shutdown.target
+Conflicts=shutdown.target
+
+[Service]
+Type=simple
+ExecStart=/usr/bin/python3 /usr/lib/move-bringup/move-swupdate-shim.py
+Restart=always
+RestartSec=1
+User=root
+
+[Install]
+WantedBy=multi-user.target

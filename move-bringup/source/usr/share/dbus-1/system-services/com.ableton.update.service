@@ -1,5 +1,5 @@
 [D-BUS Service]
 Name=com.ableton.update
-Exec=/opt/move/UpdateDBusService
+Exec=/usr/bin/python3 /usr/lib/move-bringup/move-update-dbus.py
 User=root
-SystemdService=update.service
+SystemdService=move-update-dbus.service

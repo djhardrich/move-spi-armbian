@@ -30,12 +30,14 @@ Depends: ${misc:Depends}, ${shlibs:Depends},
          dbus,
          device-tree-compiler,
          libnss-mdns,
+         openssl,
          python3,
          python3-dbus-next,
          systemd-sysv,
          udev
 Recommends: u-boot-tools, util-linux (>= 2.35), parted, e2fsprogs,
-            network-manager, iw, coreutils (>= 8.30)
+            network-manager, iw, coreutils (>= 8.30),
+            rsync, curl
 Description: Ableton Move userspace bring-up files
  Installs everything needed to run the stock Ableton Move user space
  (/opt/move) on a Debian arm64 image: the ableton user and ablspi group,

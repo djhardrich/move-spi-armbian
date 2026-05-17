@@ -1,0 +1,572 @@
+#!/usr/bin/env python3
+"""
+move-swupdate-shim — intercepts swupdate IPC from MoveLauncher/MoveWebService.
+
+Owns two UNIX sockets:
+  /tmp/swupdateprog  — progress socket (clients poll for update status)
+  /tmp/sockinstctrl  — control socket  (clients stream .swu payloads)
+
+On .swu receipt: decrypts, extracts, rsyncs /opt/move/ and /data/, then
+writes a terminal progress_msg to unblock ipc_wait_for_complete().
+"""
+
+import asyncio
+import logging
+import os
+import shutil
+import struct
+import subprocess
+import sys
+import hashlib
+import re
+import tempfile
+
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s [swupdate-shim] %(levelname)s %(message)s",
+    datefmt="%Y-%m-%dT%H:%M:%S",
+    stream=sys.stderr,
+)
+log = logging.getLogger(__name__)
+
+PROGRESS_SOCK = "/tmp/swupdateprog"
+CONTROL_SOCK  = "/tmp/sockinstctrl"
+
+IPC_MAGIC_CONTROL  = 0x14052001
+IPC_MAGIC_PROGRESS = 0x26011982
+
+# progress_msg layout (swupdate 2025.05, little-endian, 2408 bytes total)
+# struct { uint32 magic; uint32 status; uint32 dwl_pct; uint64 dwl_bytes;
+#          uint32 nsteps; uint32 cur_step; uint32 cur_pct;
+#          char cur_image[256]; char hnd_name[64];
+#          uint32 source; uint32 infolen; char info[2048]; }
+_PROGRESS_FMT = "<IIIQIII256s64sII2048s"
+assert struct.calcsize(_PROGRESS_FMT) == 2408
+
+STATUS_SUCCESS = 3
+STATUS_FAILURE = 4
+
+# Registered progress clients (ipc_wait_for_complete creates a new connection)
+_progress_clients: list[asyncio.StreamWriter] = []
+
+
+def build_progress_msg(status: int, dwl_bytes: int = 0) -> bytes:
+    return struct.pack(
+        _PROGRESS_FMT,
+        IPC_MAGIC_PROGRESS,                          # magic
+        status,                                       # status
+        100 if status == STATUS_SUCCESS else 0,       # dwl_percent
+        dwl_bytes,                                    # dwl_bytes (uint64)
+        1,                                            # nsteps
+        1,                                            # cur_step
+        100 if status == STATUS_SUCCESS else 0,       # cur_percent
+        b"move-swupdate-shim\x00",                   # cur_image[256]
+        b"file\x00",                                  # hnd_name[64]
+        0,                                            # source
+        0,                                            # infolen
+        b"\x00" * 2048,                              # info[2048]
+    )
+
+
+async def _notify_progress(status: int, dwl_bytes: int = 0) -> None:
+    msg = build_progress_msg(status, dwl_bytes)
+    dead = []
+    for w in _progress_clients:
+        try:
+            w.write(msg)
+            await w.drain()
+        except Exception:
+            dead.append(w)
+    for w in dead:
+        _progress_clients.remove(w)
+
+
+# ── progress socket handler ───────────────────────────────────────────────
+
+async def _handle_progress_client(
+    reader: asyncio.StreamReader, writer: asyncio.StreamWriter
+) -> None:
+    """Hold the connection open; write progress_msg when updates happen."""
+    log.debug("progress client connected")
+    _progress_clients.append(writer)
+    try:
+        # Block until the client disconnects (EOF / error)
+        await reader.read(-1)
+    except Exception:
+        pass
+    finally:
+        if writer in _progress_clients:
+            _progress_clients.remove(writer)
+        try:
+            writer.close()
+        except Exception:
+            pass
+    log.debug("progress client disconnected")
+
+
+# ── control socket handler ────────────────────────────────────────────────
+
+IPC_HDR_FMT = "<IIi"   # magic, command, iLen
+IPC_HDR_LEN = struct.calcsize(IPC_HDR_FMT)  # 12
+CMD_ACTIVATION = 0
+
+
+async def _handle_control_client(
+    reader: asyncio.StreamReader, writer: asyncio.StreamWriter
+) -> None:
+    """Receive .swu stream from Updater / MoveWebService."""
+    try:
+        hdr = await reader.readexactly(IPC_HDR_LEN)
+    except asyncio.IncompleteReadError:
+        return
+
+    magic, command, ilen = struct.unpack(IPC_HDR_FMT, hdr)
+    if magic != IPC_MAGIC_CONTROL:
+        log.debug("control: bad magic %#x, ignoring", magic)
+        writer.close()
+        return
+
+    if command != CMD_ACTIVATION:
+        log.info("control: unsupported command %d, discarding", command)
+        if ilen > 0:
+            await reader.read(ilen)
+        writer.close()
+        return
+
+    log.info("control: CMD_ACTIVATION received, streaming .swu ...")
+
+    # Stream payload to a temp file until EOF
+    with tempfile.NamedTemporaryFile(
+        prefix="move-swu-", suffix=".swu", delete=False
+    ) as tmp:
+        tmp_path = tmp.name
+        total = 0
+        while True:
+            chunk = await reader.read(65536)
+            if not chunk:
+                break
+            tmp.write(chunk)
+            total += len(chunk)
+
+    log.info("control: received %d bytes → %s", total, tmp_path)
+    writer.close()
+
+    result = await asyncio.get_running_loop().run_in_executor(
+        None, process_swu, tmp_path
+    )
+    status = STATUS_SUCCESS if result == "success" else STATUS_FAILURE
+    await _notify_progress(status, total)
+
+    try:
+        os.unlink(tmp_path)
+    except OSError:
+        pass
+
+
+KEY_FILE = "/etc/move-swupdate/symmetrickey"
+PUBKEY_FILE = "/etc/move-swupdate/publickey.pem"
+
+
+def _safe_workdir_path(workdir: str, filename: str) -> "str | None":
+    """Return absolute path only if it resolves inside workdir, else None."""
+    candidate = os.path.normpath(os.path.join(workdir, filename))
+    if candidate.startswith(workdir.rstrip("/") + "/"):
+        return candidate
+    return None
+
+
+def _sha256_file(path: str) -> str:
+    h = hashlib.sha256()
+    with open(path, "rb") as f:
+        for chunk in iter(lambda: f.read(65536), b""):
+            h.update(chunk)
+    return h.hexdigest()
+
+
+def _extract_paren_block(text: str, key: str) -> "str | None":
+    """Find key = ( ... ) in libconfig text using paren-depth counting.
+    Returns the content between the outer parens, or None if not found."""
+    m = re.search(rf'\b{key}\s*=\s*\(', text)
+    if not m:
+        return None
+    start = m.end()
+    depth = 1
+    for i in range(start, len(text)):
+        ch = text[i]
+        if ch == "(":
+            depth += 1
+        elif ch == ")":
+            depth -= 1
+            if depth == 0:
+                return text[start:i]
+    return None
+
+
+def _parse_sw_description(text: str) -> dict:
+    """
+    Minimal libconfig parser for sw-description.
+    Returns {'version': str, 'files': [...], 'scripts': [...]}.
+    Each file dict has: filename, type, sha256, encrypted, path, create_destination.
+    Each script dict has: filename, sha256.
+    """
+    result = {"version": "", "files": [], "scripts": []}
+
+    ver_m = re.search(r'version\s*=\s*"([^"]+)"', text)
+    if ver_m:
+        result["version"] = ver_m.group(1)
+
+    def parse_block(block_text: str) -> dict:
+        entry = {
+            "filename": "", "type": "", "sha256": "",
+            "encrypted": False, "path": "", "create_destination": False,
+        }
+        for k, v in re.findall(r'(\w[\w-]*)\s*=\s*"([^"]*)"', block_text):
+            key = k.replace("-", "_")
+            if key == "filename":
+                entry["filename"] = v
+            elif key == "type":
+                entry["type"] = v
+            elif key == "sha256":
+                entry["sha256"] = v
+            elif key == "path":
+                entry["path"] = v
+        if re.search(r'encrypted\s*=\s*true', block_text):
+            entry["encrypted"] = True
+        if re.search(r'create-destination\s*=\s*"true"', block_text):
+            entry["create_destination"] = True
+        return entry
+
+    for arr_name in ("files", "images"):
+        arr_text = _extract_paren_block(text, arr_name)
+        if arr_text is None:
+            continue
+        depth = 0
+        start = None
+        for i, ch in enumerate(arr_text):
+            if ch == "{":
+                if depth == 0:
+                    start = i + 1
+                depth += 1
+            elif ch == "}":
+                depth -= 1
+                if depth == 0 and start is not None:
+                    block = arr_text[start:i]
+                    result["files"].append(parse_block(block))
+
+    scripts_block = _extract_paren_block(text, "scripts")
+    if scripts_block is not None:
+        depth = 0
+        start = None
+        arr_text = scripts_block
+        for i, ch in enumerate(arr_text):
+            if ch == "{":
+                if depth == 0:
+                    start = i + 1
+                depth += 1
+            elif ch == "}":
+                depth -= 1
+                if depth == 0 and start is not None:
+                    block = arr_text[start:i]
+                    s: dict = {"filename": "", "sha256": ""}
+                    fn_m = re.search(r'filename\s*=\s*"([^"]+)"', block)
+                    sh_m = re.search(r'sha256\s*=\s*"([^"]+)"', block)
+                    if fn_m:
+                        s["filename"] = fn_m.group(1)
+                    if sh_m:
+                        s["sha256"] = sh_m.group(1)
+                    result["scripts"].append(s)
+
+    return result
+
+
+def _verify_rsa_signature(sw_desc_path: str, sig_path: str, pubkey_path: str) -> bool:
+    try:
+        r = subprocess.run(
+            ["openssl", "dgst", "-sha256", "-verify", pubkey_path,
+             "-signature", sig_path, sw_desc_path],
+            capture_output=True, text=True
+        )
+        return r.returncode == 0
+    except Exception as e:
+        log.debug("RSA verify exception: %s", e)
+        return False
+
+
+def _handle_raw_payload(entry: dict, workdir: str) -> str:
+    filename = entry["filename"]
+    src = _safe_workdir_path(workdir, filename)
+    if src is None:
+        log.error("raw payload filename escapes workdir: %s", filename)
+        return "failure"
+
+    if entry["encrypted"]:
+        if not os.path.exists(KEY_FILE):
+            log.error("AES key file not found: %s", KEY_FILE)
+            return "failure"
+        with open(KEY_FILE) as kf:
+            key_text = kf.read().strip().split()
+        if len(key_text) < 2:
+            log.error("Bad key file format in %s", KEY_FILE)
+            return "failure"
+        key_hex, iv_hex = key_text[0], key_text[1]
+        dec = src + ".dec"
+        r = subprocess.run(
+            ["openssl", "enc", "-d", "-aes-256-cbc",
+             "-K", key_hex, "-iv", iv_hex, "-nosalt",
+             "-in", src, "-out", dec],
+            capture_output=True
+        )
+        if r.returncode != 0:
+            log.error("AES decrypt failed: %s", r.stderr.decode())
+            return "failure"
+        src = dec
+
+    if src.endswith(".gz"):
+        base = src[:-3]
+        r = subprocess.run(["gunzip", "-f", src], capture_output=True)
+        if r.returncode != 0:
+            log.error("gunzip failed: %s", r.stderr.decode())
+            return "failure"
+        src = base
+
+    mntdir = tempfile.mkdtemp(prefix="move-swu-mnt-")
+    try:
+        r = subprocess.run(
+            ["mount", "-o", "ro,loop", src, mntdir],
+            capture_output=True
+        )
+        if r.returncode != 0:
+            log.error("mount failed: %s", r.stderr.decode())
+            return "failure"
+        try:
+            result = _rsync_from_mount(mntdir)
+        finally:
+            subprocess.run(["umount", mntdir], capture_output=True)
+    finally:
+        try:
+            os.rmdir(mntdir)
+        except OSError:
+            pass
+
+    return result
+
+
+def _rsync_from_mount(mntdir: str) -> str:
+    result = "success"
+
+    opt_src = os.path.join(mntdir, "opt", "move") + "/"
+    if os.path.isdir(opt_src):
+        log.info("rsyncing /opt/move/ ...")
+        r = subprocess.run([
+            "rsync", "-aHAX", "--delete",
+            "--exclude=log/", "--exclude=*.log",
+            opt_src, "/opt/move/",
+        ], capture_output=True)
+        if r.returncode != 0:
+            log.error("rsync /opt/move/ failed: %s", r.stderr.decode())
+            result = "failure"
+        else:
+            subprocess.run(["ldconfig"], capture_output=True)
+            log.info("rsync /opt/move/ done")
+
+    data_src = os.path.join(mntdir, "data") + "/"
+    if os.path.isdir(data_src) and os.listdir(data_src):
+        log.info("rsyncing /data/ → /var/lib/move-data/ ...")
+        r = subprocess.run([
+            "rsync", "-aHAX",
+            "--exclude=UserData/",
+            "--exclude=log/", "--exclude=Scratch/",
+            "--exclude=**/.cache/", "--exclude=**/Sentry/",
+            "--exclude=**/*.log", "--exclude=**/lost+found/",
+            data_src, "/var/lib/move-data/",
+        ], capture_output=True)
+        if r.returncode != 0:
+            log.error("rsync /data/ failed: %s", r.stderr.decode())
+            result = "failure"
+        else:
+            log.info("rsync /data/ done")
+
+    return result
+
+
+def _handle_archive_payload(entry: dict, workdir: str) -> str:
+    filename = entry["filename"]
+    src = _safe_workdir_path(workdir, filename)
+    if src is None:
+        log.error("archive payload filename escapes workdir: %s", filename)
+        return "failure"
+    raw_dest = entry["path"].replace("/data/", "/var/lib/move-data/")
+    if not raw_dest:
+        raw_dest = "/var/lib/move-data/"
+    dest = os.path.normpath(raw_dest)
+    if not (dest == "/var/lib/move-data" or dest.startswith("/var/lib/move-data/")):
+        log.error("archive destination outside allowed tree: %s", dest)
+        return "failure"
+
+    if entry["create_destination"]:
+        os.makedirs(dest, exist_ok=True)
+
+    log.info("extracting %s → %s", filename, dest)
+    r = subprocess.run(
+        ["tar", "-xzf", src, "-C", dest,
+         "--warning=no-unknown-keyword"],
+        capture_output=True
+    )
+    if r.returncode != 0:
+        log.error("tar extract failed: %s", r.stderr.decode())
+        return "failure"
+
+    subprocess.run(["chown", "-R", "ableton:users", dest], capture_output=True)
+    log.info("archive extract done")
+    return "success"
+
+
+def process_swu(path: str) -> str:
+    """Process a .swu file. Returns 'success' or 'failure'."""
+    workdir = tempfile.mkdtemp(prefix="move-swu-")
+    try:
+        return _process_swu_inner(path, workdir)
+    except Exception as e:
+        log.exception("process_swu unhandled exception: %s", e)
+        return "failure"
+    finally:
+        shutil.rmtree(workdir, ignore_errors=True)
+
+
+def _process_swu_inner(path: str, workdir: str) -> str:
+    # 1. CPIO extract
+    log.info("extracting CPIO from %s", path)
+    with open(path, "rb") as f:
+        r = subprocess.run(
+            ["cpio", "-id", "--quiet"],
+            stdin=f, capture_output=True, cwd=workdir
+        )
+    if r.returncode != 0:
+        log.error("cpio extract failed: %s", r.stderr.decode())
+        return "failure"
+
+    sw_desc_path = os.path.join(workdir, "sw-description")
+    if not os.path.exists(sw_desc_path):
+        log.error("sw-description not found in .swu")
+        return "failure"
+
+    # 2. Signature verification (permissive)
+    sig_path = os.path.join(workdir, "sw-description.sig")
+    if os.path.exists(sig_path) and os.path.exists(PUBKEY_FILE):
+        ok = _verify_rsa_signature(sw_desc_path, sig_path, PUBKEY_FILE)
+        if ok:
+            log.info("sw-description signature verified with known key")
+        else:
+            log.warning(
+                "signature not verified with known key — "
+                "proceeding as root operator"
+            )
+    else:
+        log.info("signature check skipped (sig or pubkey absent)")
+
+    # 3. Parse sw-description
+    with open(sw_desc_path) as f:
+        sw_desc_text = f.read()
+    desc = _parse_sw_description(sw_desc_text)
+    log.info("sw-description version=%s, %d file(s), %d script(s)",
+             desc["version"], len(desc["files"]), len(desc["scripts"]))
+
+    # 4. SHA-256 verify all payloads
+    for entry in desc["files"] + desc["scripts"]:
+        if not entry["sha256"]:
+            continue
+        fpath = _safe_workdir_path(workdir, entry["filename"])
+        if fpath is None:
+            log.error("payload filename escapes workdir: %s", entry["filename"])
+            return "failure"
+        if not os.path.exists(fpath):
+            log.error("payload file missing: %s", entry["filename"])
+            return "failure"
+        actual = _sha256_file(fpath)
+        if actual != entry["sha256"]:
+            log.error(
+                "SHA-256 mismatch for %s: expected %s got %s",
+                entry["filename"], entry["sha256"], actual
+            )
+            return "failure"
+        log.debug("sha256 OK: %s", entry["filename"])
+
+    # 5. Dispatch by type
+    result = "success"
+    for entry in desc["files"]:
+        ptype = entry["type"]
+        if ptype in ("raw", "rawfile"):
+            r2 = _handle_raw_payload(entry, workdir)
+        elif ptype == "archive":
+            r2 = _handle_archive_payload(entry, workdir)
+        else:
+            log.warning("unknown payload type %r — skipping", ptype)
+            continue
+        if r2 != "success":
+            result = r2
+
+    # 6. Run scripts
+    for s in desc["scripts"]:
+        sname = s["filename"]
+        spath = _safe_workdir_path(workdir, sname)
+        if spath is None:
+            log.warning("script filename escapes workdir: %s — skipping", sname)
+            continue
+        if not os.path.exists(spath):
+            log.warning("script not found: %s", sname)
+            continue
+        os.chmod(spath, 0o755)
+        log.info("running script: %s", sname)
+        r3 = subprocess.run(["bash", spath], capture_output=True)
+        if r3.returncode != 0:
+            log.warning("script %s exited %d: %s",
+                        sname, r3.returncode, r3.stderr.decode())
+        else:
+            log.info("script %s: OK", sname)
+
+    # 7. Restart launcher
+    if result == "success":
+        log.info("restarting move-launcher + move-web ...")
+        subprocess.run(
+            ["systemctl", "try-restart",
+             "move-launcher.service", "move-web.service"],
+            capture_output=True
+        )
+
+    log.info("process_swu result: %s", result)
+    return result
+
+
+# ── socket helpers ────────────────────────────────────────────────────────
+
+def _remove_socket(path: str) -> None:
+    try:
+        os.unlink(path)
+    except FileNotFoundError:
+        pass
+
+
+async def main() -> None:
+    _remove_socket(PROGRESS_SOCK)
+    _remove_socket(CONTROL_SOCK)
+
+    prog_server = await asyncio.start_unix_server(
+        _handle_progress_client, path=PROGRESS_SOCK
+    )
+    os.chmod(PROGRESS_SOCK, 0o666)
+
+    ctrl_server = await asyncio.start_unix_server(
+        _handle_control_client, path=CONTROL_SOCK
+    )
+    os.chmod(CONTROL_SOCK, 0o666)
+
+    log.info("listening on %s and %s", PROGRESS_SOCK, CONTROL_SOCK)
+    async with prog_server, ctrl_server:
+        await asyncio.gather(
+            prog_server.serve_forever(),
+            ctrl_server.serve_forever(),
+        )
+
+
+if __name__ == "__main__":
+    asyncio.run(main())

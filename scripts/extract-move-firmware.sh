@@ -25,6 +25,13 @@
 #   ./extract-move-firmware.sh [--host root@move.local] [--output DIR]
 #                              [--version VER] [--keep-tmp]
 #                              [--no-data | --data-only] [--firmware-only]
+#                              [--from-mount DIR] [--keys]
+#
+# Modes:
+#   (default)           SSH to a live Move device and rsync firmware + data
+#   --from-mount DIR    Read from a locally-mounted stock rootfs partition
+#                       (e.g. /run/media/user1/<uuid>). Always extracts keys.
+#                       DIR must be the root of the mounted stock partition.
 #
 # By default produces TWO debs in <output-dir>:
 #   - move-firmware_<version>_arm64.deb     : /opt/move/* + vendored libs
@@ -37,13 +44,9 @@
 #   --firmware-only   skip the /data pull
 #   --no-data         alias for --firmware-only
 #   --data-only       only pull /data; skip /opt/move
+#   --keys            (SSH mode) also extract swupdate key files
 #   --output DIR      write debs to DIR instead of cwd
-#
-# After it runs, copy whichever debs you produced into your Armbian build:
-#   cp move-firmware_*_arm64.deb move-user-data_*_arm64.deb \
-#      ~/armbian-build/userpatches/overlay/extras/
-# and run compile.sh as normal. customize-image.sh will dpkg -i them in
-# the chroot, in order (move-bringup → move-firmware → move-user-data).
+# END_USAGE
 
 set -euo pipefail
 
@@ -55,6 +58,8 @@ KEEP_TMP=0
 PULL_FIRMWARE=1     # /opt/move/* + vendored libs -> move-firmware_*.deb
 PULL_DATA=1         # /data -> move-user-data_*.deb (default ON)
 SSH_OPTS=(-o ConnectTimeout=10 -o StrictHostKeyChecking=accept-new)
+FROM_MOUNT=""       # path to mounted stock rootfs (--from-mount DIR)
+PULL_KEYS=0         # extract swupdate key files (always on with --from-mount)
 
 # ── Arg parsing ─────────────────────────────────────────────────────────
 while [ $# -gt 0 ]; do
@@ -66,8 +71,10 @@ while [ $# -gt 0 ]; do
         --no-data|--firmware-only)
                            PULL_DATA=0; shift ;;
         --data-only)       PULL_FIRMWARE=0; PULL_DATA=1; shift ;;
+        --from-mount)      FROM_MOUNT="$2"; PULL_KEYS=1; shift 2 ;;
+        --keys)            PULL_KEYS=1; shift ;;
         -h|--help)
-            sed -n '/^# USAGE/,/^# After/p' "$0" | sed 's/^# \?//'
+            sed -n '/^# USAGE/,/^# END_USAGE/p' "$0" | grep -v '^# END_USAGE' | sed 's/^# \?//'
             exit 0
             ;;
         *)
@@ -86,39 +93,61 @@ command -v rsync  >/dev/null || fatal "rsync not found (apt install rsync)"
 command -v dpkg-deb >/dev/null || fatal "dpkg-deb not found (apt install dpkg)"
 command -v fakeroot >/dev/null || fatal "fakeroot not found (apt install fakeroot)"
 
+# ── from-mount mode: validate the mount path ────────────────────────────────
+if [ -n "$FROM_MOUNT" ]; then
+    [ -d "$FROM_MOUNT" ] || fatal "--from-mount path does not exist: $FROM_MOUNT"
+    [ -f "$FROM_MOUNT/etc/os-release" ] || \
+        fatal "$FROM_MOUNT does not look like a rootfs (no /etc/os-release)"
+    [ -d "$FROM_MOUNT/opt/move" ] || \
+        fatal "$FROM_MOUNT/opt/move not found; wrong partition?"
+    log "using --from-mount: $FROM_MOUNT"
+fi
+
+if [ "$PULL_KEYS" = 1 ] && [ "$PULL_FIRMWARE" = 0 ]; then
+    log "WARNING: --keys has no effect with --data-only (key extraction requires --firmware); ignoring --keys"
+    PULL_KEYS=0
+fi
+
 # ── 1. Verify the host is actually a Move ───────────────────────────────
-log "checking $HOST"
-if ! ssh "${SSH_OPTS[@]}" "$HOST" 'true' 2>/dev/null; then
-    fatal "cannot ssh to $HOST"
-fi
+if [ -z "$FROM_MOUNT" ]; then
+    log "checking $HOST"
+    if ! ssh "${SSH_OPTS[@]}" "$HOST" 'true' 2>/dev/null; then
+        fatal "cannot ssh to $HOST"
+    fi
 
-remote_os=$(ssh "${SSH_OPTS[@]}" "$HOST" 'cat /etc/os-release 2>/dev/null | grep -E "^ID=" || true')
-if ! echo "$remote_os" | grep -q 'ableton'; then
-    log "WARNING: $HOST does not look like an AbletonOS device"
-    log "         /etc/os-release ID is: $remote_os"
-    log "         continuing anyway in 3s; ctrl-C to abort..."
-    sleep 3
-fi
+    remote_os=$(ssh "${SSH_OPTS[@]}" "$HOST" 'cat /etc/os-release 2>/dev/null | grep -E "^ID=" || true')
+    if ! echo "$remote_os" | grep -q 'ableton'; then
+        log "WARNING: $HOST does not look like an AbletonOS device"
+        log "         /etc/os-release ID is: $remote_os"
+        log "         continuing anyway in 3s; ctrl-C to abort..."
+        sleep 3
+    fi
 
-remote_arch=$(ssh "${SSH_OPTS[@]}" "$HOST" 'uname -m')
-if [ "$remote_arch" != "aarch64" ]; then
-    fatal "$HOST architecture is $remote_arch, expected aarch64"
-fi
+    remote_arch=$(ssh "${SSH_OPTS[@]}" "$HOST" 'uname -m')
+    if [ "$remote_arch" != "aarch64" ]; then
+        fatal "$HOST architecture is $remote_arch, expected aarch64"
+    fi
 
-if ! ssh "${SSH_OPTS[@]}" "$HOST" '[ -x /opt/move/MoveLauncher ]'; then
-    fatal "$HOST does not have /opt/move/MoveLauncher; not a Move?"
+    if ! ssh "${SSH_OPTS[@]}" "$HOST" '[ -x /opt/move/MoveLauncher ]'; then
+        fatal "$HOST does not have /opt/move/MoveLauncher; not a Move?"
+    fi
 fi
 
 # ── 2. Resolve version ──────────────────────────────────────────────────
 if [ -z "$VERSION" ]; then
-    remote_ver=$(ssh "${SSH_OPTS[@]}" "$HOST" \
-        'grep -E "^VERSION_ID=" /etc/os-release | cut -d= -f2 | tr -d "\""')
-    if [ -z "$remote_ver" ]; then
+    if [ -n "$FROM_MOUNT" ]; then
+        raw_ver=$(grep -E '^VERSION_ID=' "$FROM_MOUNT/etc/os-release" \
+            | cut -d= -f2 | tr -d '"' || true)
+    else
+        raw_ver=$(ssh "${SSH_OPTS[@]}" "$HOST" \
+            'grep -E "^VERSION_ID=" /etc/os-release | cut -d= -f2 | tr -d "\""')
+    fi
+    if [ -z "$raw_ver" ]; then
         VERSION="0.0.0-$(date +%Y%m%d)"
         log "could not read VERSION_ID; defaulting to $VERSION"
     else
         # Normalise "abletonos-aarch64-rpi4-v3.18" -> "3.18"
-        VERSION=$(echo "$remote_ver" \
+        VERSION=$(echo "$raw_ver" \
             | sed -nE 's/.*-v([0-9]+\.[0-9]+(\.[0-9]+)?).*/\1/p')
         [ -z "$VERSION" ] && VERSION="$(date +%Y%m%d)"
     fi
@@ -136,13 +165,22 @@ mkdir -p "$PKGROOT"/{DEBIAN,opt/move,opt/move/lib,etc/ld.so.conf.d}
 mkdir -p "$PKGROOT"/usr/lib/aarch64-linux-gnu
 
 # ── 4. Pull /opt/move ───────────────────────────────────────────────────
-log "rsync /opt/move/  (this is the big one, ~70 MB)"
-rsync -aHAX --info=progress2 \
-      -e "ssh ${SSH_OPTS[*]}" \
-      --exclude='*.log' \
-      --exclude='log/' \
-      --exclude='Scratch/' \
-      "$HOST:/opt/move/" "$PKGROOT/opt/move/"
+if [ -n "$FROM_MOUNT" ]; then
+    log "rsync /opt/move/ from $FROM_MOUNT (local)"
+    rsync -aHAX \
+          --exclude='*.log' \
+          --exclude='log/' \
+          --exclude='Scratch/' \
+          "$FROM_MOUNT/opt/move/" "$PKGROOT/opt/move/"
+else
+    log "rsync /opt/move/  (this is the big one, ~70 MB)"
+    rsync -aHAX --info=progress2 \
+          -e "ssh ${SSH_OPTS[*]}" \
+          --exclude='*.log' \
+          --exclude='log/' \
+          --exclude='Scratch/' \
+          "$HOST:/opt/move/" "$PKGROOT/opt/move/"
+fi
 
 # ── 5. Pull the vendored libraries Debian doesn't carry ────────────────
 # Each entry is the SONAME we want callable from the Ableton binaries.
@@ -160,16 +198,24 @@ VENDORED_PREFIXES=(
 for prefix in "${VENDORED_PREFIXES[@]}"; do
     # Use the device's shell to glob-expand: catches both the SONAME
     # symlink and its versioned target file.
-    files=$(ssh "${SSH_OPTS[@]}" "$HOST" \
-            "ls /usr/lib/${prefix}.so* 2>/dev/null" | tr '\n' ' ')
+    if [ -n "$FROM_MOUNT" ]; then
+        files=$(ls "$FROM_MOUNT/usr/lib/${prefix}.so"* 2>/dev/null | tr '\n' ' ' || true)
+    else
+        files=$(ssh "${SSH_OPTS[@]}" "$HOST" \
+                "ls /usr/lib/${prefix}.so* 2>/dev/null" | tr '\n' ' ')
+    fi
     if [ -z "$files" ]; then
-        log "  - ${prefix}.so* (not on device; skipping)"
+        log "  - ${prefix}.so* (not found; skipping)"
         continue
     fi
     log "  + ${prefix}.so*  ($(echo "$files" | wc -w | tr -d ' ') file(s))"
     for f in $files; do
-        rsync -aHAX -e "ssh ${SSH_OPTS[*]}" \
-              "$HOST:$f" "$PKGROOT/opt/move/lib/"
+        if [ -n "$FROM_MOUNT" ]; then
+            rsync -aHAX "$f" "$PKGROOT/opt/move/lib/"
+        else
+            rsync -aHAX -e "ssh ${SSH_OPTS[*]}" \
+                  "$HOST:$f" "$PKGROOT/opt/move/lib/"
+        fi
     done
 done
 
@@ -287,6 +333,37 @@ exit 0
 EOF
 chmod 0755 "$PKGROOT/DEBIAN/postrm"
 
+# ── 10b. Extract swupdate keys (--keys / --from-mount always) ───────────────
+if [ "$PULL_KEYS" = 1 ]; then
+    log "extracting swupdate key files"
+    mkdir -p "$PKGROOT/etc/move-swupdate"
+
+    if [ -n "$FROM_MOUNT" ]; then
+        SYM_SRC="$FROM_MOUNT/etc/swupdate/move-dev_symmetrickey"
+        PUB_SRC="$FROM_MOUNT/etc/swupdate/move-dev_publickey.pem"
+        [ -f "$SYM_SRC" ] || fatal "symmetrickey not found at $SYM_SRC"
+        [ -f "$PUB_SRC" ] || fatal "publickey.pem not found at $PUB_SRC"
+        cp "$SYM_SRC" "$PKGROOT/etc/move-swupdate/symmetrickey"
+        cp "$PUB_SRC" "$PKGROOT/etc/move-swupdate/publickey.pem"
+    else
+        scp -o ConnectTimeout=10 -o StrictHostKeyChecking=accept-new \
+            "$HOST:/etc/swupdate/move-dev_symmetrickey" \
+            "$PKGROOT/etc/move-swupdate/symmetrickey" \
+            || fatal "could not copy symmetrickey from $HOST"
+        scp -o ConnectTimeout=10 -o StrictHostKeyChecking=accept-new \
+            "$HOST:/etc/swupdate/move-dev_publickey.pem" \
+            "$PKGROOT/etc/move-swupdate/publickey.pem" \
+            || fatal "could not copy publickey.pem from $HOST"
+    fi
+    chmod 0600 "$PKGROOT/etc/move-swupdate/symmetrickey"
+    log "keys staged at $PKGROOT/etc/move-swupdate/"
+
+    # Insert key lockdown into the configure) stanza of the existing postinst,
+    # before the closing exit 0, so it actually runs.
+    sed -i 's|^exit 0|        # Protect swupdate key files\n        if [ -f /etc/move-swupdate/symmetrickey ]; then\n            chmod 0600 /etc/move-swupdate/symmetrickey\n            chown root:root /etc/move-swupdate/symmetrickey\n        fi\nexit 0|' \
+        "$PKGROOT/DEBIAN/postinst"
+fi
+
 # ── 11. Build the firmware deb ─────────────────────────────────────────
 FIRMWARE_DEB="$OUTPUT_DIR/move-firmware_${VERSION}-1_arm64.deb"
 log "building $FIRMWARE_DEB"
@@ -307,16 +384,28 @@ if [ "$PULL_DATA" = 1 ]; then
     # that's regenerated at runtime and would just bloat the deb. The
     # log dir is recreated by move-bringup.postinst with the right
     # permissions; Scratch is workspace.
-    log "rsync /data/  (this may take a while if the user has samples)"
-    rsync -aHAX --info=progress2 \
-          -e "ssh ${SSH_OPTS[*]}" \
-          --exclude='log/' \
-          --exclude='Scratch/' \
-          --exclude='**/.cache/' \
-          --exclude='**/Sentry/' \
-          --exclude='**/*.log' \
-          --exclude='**/lost+found/' \
-          "$HOST:/data/" "$DATAROOT/var/lib/move-data/"
+    if [ -n "$FROM_MOUNT" ]; then
+        log "rsync /data/ from $FROM_MOUNT (local)"
+        rsync -aHAX \
+              --exclude='log/' \
+              --exclude='Scratch/' \
+              --exclude='**/.cache/' \
+              --exclude='**/Sentry/' \
+              --exclude='**/*.log' \
+              --exclude='**/lost+found/' \
+              "$FROM_MOUNT/data/" "$DATAROOT/var/lib/move-data/"
+    else
+        log "rsync /data/  (this may take a while if the user has samples)"
+        rsync -aHAX --info=progress2 \
+              -e "ssh ${SSH_OPTS[*]}" \
+              --exclude='log/' \
+              --exclude='Scratch/' \
+              --exclude='**/.cache/' \
+              --exclude='**/Sentry/' \
+              --exclude='**/*.log' \
+              --exclude='**/lost+found/' \
+              "$HOST:/data/" "$DATAROOT/var/lib/move-data/"
+    fi
 
     # Compute installed size BEFORE we drop the control files.
     DATA_INSTALLED_KB=$(du -sk "$DATAROOT" --exclude=DEBIAN | awk '{print $1}')

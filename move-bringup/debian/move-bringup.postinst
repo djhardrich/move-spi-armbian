@@ -146,7 +146,9 @@ case "$1" in
                      move-launcher.service \
                      move-web.service \
                      move-xmos-shutdown.service \
-                     move-connman-shim.service; do
+                     move-connman-shim.service \
+                     move-swupdate-shim.service \
+                     move-update-dbus.service; do
                 systemctl enable "$u" >/dev/null 2>&1 || true
             done
 
@@ -192,14 +194,15 @@ case "$1" in
             systemctl enable move-firstboot-wifi.service 2>/dev/null || true
         fi
 
-        # swupdateprog-stub: hands MoveControlModeHandler a working
-        # /tmp/swupdateprog socket so it stops spinning on connect()
-        # and progresses to open /dev/ablspi0.0. See script header for
-        # the full reasoning. Enable + start now so install-time
-        # MoveLauncher works without a reboot.
+        # move-swupdate-shim: intercepts swupdate IPC from MoveLauncher/
+        # MoveWebService, processes .swu payloads, and reports progress.
+        # move-update-dbus: Python D-Bus shim for com.ableton.update,
+        # replacing UpdateDBusService which requires U-Boot env missing
+        # on Armbian. Enable + start now; idempotent.
         if [ -d /run/systemd/system ]; then
-            systemctl enable swupdateprog-stub.service >/dev/null 2>&1 || true
-            systemctl start swupdateprog-stub.service >/dev/null 2>&1 || true
+            systemctl disable --now swupdateprog-stub.service >/dev/null 2>&1 || true
+            systemctl enable --now move-swupdate-shim.service >/dev/null 2>&1 || true
+            systemctl enable --now move-update-dbus.service >/dev/null 2>&1 || true
         fi
 
         # Pin the kernel packages so `apt upgrade` cannot replace our

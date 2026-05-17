@@ -1,3 +1,22 @@
+move-bringup (1.0.14-1) unstable; urgency=medium
+
+  * Replace swupdateprog-stub with move-swupdate-shim: full asyncio daemon
+    that intercepts /tmp/sockinstctrl and /tmp/swupdateprog, processes .swu
+    payloads (Ableton AES-encrypted ext4 and third-party archive types),
+    rsyncs /opt/move/ and /data/, and writes terminal progress_msg to
+    unblock ipc_wait_for_complete(). Fixes RNBO web-upload "Network Error".
+  * Add move-update-dbus.py: Python D-Bus shim for com.ableton.update,
+    replacing UpdateDBusService which crashes on Armbian (no libubootenv
+    /etc/fw_env.config). Implements registerSuccessfulStartup() as no-op
+    and factoryReset(as) with safe /var/lib/move-data/ subtree wipe.
+  * Add move-update-check.sh: checks Ableton CDN (stable/beta channel)
+    for newer firmware; downloads and installs via /opt/move/Updater.
+  * Add etc/move-swupdate/channel: default channel config (stable).
+  * Add openssl, rsync, curl to Depends/Recommends.
+
+ -- Move Port <move-port@localhost>  Sun, 17 May 2026 00:00:00 +0000
+
+
 move-bringup (1.0.13-1) unstable; urgency=medium
 
   * New: move-connman-shim — Python 3 daemon that owns the well-known
