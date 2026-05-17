@@ -14,6 +14,15 @@ move-bringup (1.0.22-1) unstable; urgency=medium
   * move-swupdate-shim: fix SyntaxError — global declaration for
     _current_status/_current_pct must precede first use in function body;
     Python 3.12 strictly enforces this; shim was crash-looping on every boot.
+  * move-swupdate-shim: fix progress display — switch from unreliable
+    asyncio.run_coroutine_threadsafe push to a 100 ms polling loop in the
+    progress socket handler; fixes 0%-stuck display and hang-at-100% when
+    the web client waits for STATUS_SUCCESS.
+  * move-swupdate-shim: run .swu postinstall scripts instead of skipping
+    them; treat non-zero exit as a non-fatal warning so firmware postinstalls
+    that call fw_setenv (absent on Armbian) do not block the update, while
+    content-only postinstalls (e.g. rnbo-move) run correctly and install
+    their graphs/presets/runner config.
 
  -- Move Port <move-port@localhost>  Sun, 17 May 2026 00:00:00 +0000
 

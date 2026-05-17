@@ -102,19 +102,32 @@ async def _notify_progress(status: int, dwl_bytes: int = 0, cur_pct: int = 0) ->
 async def _handle_progress_client(
     reader: asyncio.StreamReader, writer: asyncio.StreamWriter
 ) -> None:
-    """Hold the connection open; write progress_msg when updates happen."""
+    """Hold the connection open; poll _current_pct/_current_status and push
+    a progress_msg on every change.  Exits when the client disconnects or
+    STATUS_SUCCESS/FAILURE is sent."""
     log.debug("progress client connected")
     _progress_clients.append(writer)
-    # Immediately deliver current state so clients that connect mid-update
-    # see the live percentage instead of being stuck at 0%.
+    last_pct    = -1
+    last_status = -1
     try:
-        writer.write(build_progress_msg(_current_status, cur_pct=_current_pct))
-        await writer.drain()
-    except Exception:
-        pass
-    try:
-        # Block until the client disconnects (EOF / error)
-        await reader.read(-1)
+        while True:
+            pct    = _current_pct
+            status = _current_status
+            if pct != last_pct or status != last_status:
+                last_pct    = pct
+                last_status = status
+                writer.write(build_progress_msg(status, cur_pct=pct))
+                await writer.drain()
+                if status in (STATUS_SUCCESS, STATUS_FAILURE):
+                    break
+            # Yield to the event loop; check again in 100 ms.
+            try:
+                await asyncio.wait_for(reader.read(1), timeout=0.1)
+                break   # client sent EOF / disconnected early
+            except asyncio.TimeoutError:
+                pass
+            except Exception:
+                break
     except Exception:
         pass
     finally:
@@ -208,11 +221,8 @@ async def _handle_control_client(
     _current_pct    = 0
 
     def _progress_cb(pct: int, label: str = "installing") -> None:
-        """Thread-safe progress update from the sync processing thread."""
         global _current_pct
         _current_pct = pct
-        msg = build_progress_msg(STATUS_RUN, cur_pct=pct, cur_image=label)
-        asyncio.run_coroutine_threadsafe(_notify_raw(msg), loop)
 
     result = await loop.run_in_executor(
         None, lambda: process_swu(tmp_path, _progress_cb)
@@ -771,12 +781,32 @@ def _process_swu_inner(path: str, workdir: str, progress) -> str:
         if r2 != "success":
             result = r2
 
-    # 6. Scripts: Ableton's postinstall scripts expect swupdate's A/B partition
-    # environment (U-Boot env vars, specific mount layout). Skip execution on
-    # Armbian — the payload files themselves are what matters.
+    # 6. Scripts: run postinstall scripts extracted from the .swu. Treat
+    # failures as non-fatal warnings — firmware postinstalls that call
+    # fw_setenv/fw_printenv (U-Boot, absent on Armbian) will exit non-zero
+    # but the payload files are already in place and that is what matters.
     progress(95, "finalizing")
     for s in desc["scripts"]:
-        log.info("skipping script %s (not applicable on Armbian)", s["filename"])
+        script_path = os.path.join(workdir, s["filename"])
+        if not os.path.exists(script_path):
+            log.info("script %s not found in workdir, skipping", s["filename"])
+            continue
+        log.info("running script %s", s["filename"])
+        try:
+            r = subprocess.run(
+                ["bash", script_path],
+                capture_output=True, text=True, timeout=120
+            )
+            if r.returncode != 0:
+                log.warning("script %s exited %d: %s",
+                            s["filename"], r.returncode,
+                            (r.stderr or r.stdout).strip()[:400])
+            else:
+                log.info("script %s completed OK", s["filename"])
+        except subprocess.TimeoutExpired:
+            log.warning("script %s timed out after 120 s", s["filename"])
+        except Exception as e:
+            log.warning("script %s failed: %s", s["filename"], e)
 
     log.info("process_swu result: %s", result)
     return result
