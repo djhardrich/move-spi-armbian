@@ -1,3 +1,21 @@
+move-bringup (1.0.24-1) unstable; urgency=medium
+
+  * move-launcher.service: restore KillMode=process (revert erroneous
+    KillMode=mixed from 1.0.22); mixed kills all cgroup members on stop,
+    which terminates tool module children that are supposed to outlive
+    MoveLauncher in standalone-launch scenarios.
+  * move-swupdate-shim: restore asyncio.run_coroutine_threadsafe push in
+    _progress_cb alongside the poll loop so on-Move display receives live
+    progress updates during install; 1.0.22 poll-only approach did not push
+    to MoveLauncher's progress socket connection, leaving the display stuck
+    at 0% throughout the update.
+  * move-swupdate-shim: embed a full progress_msg in ipc_get_status
+    (command != CMD_ACTIVATION) responses on the control socket so any
+    client reading the on-wire progress_msg struct gets correct magic,
+    status, and percentage.
+
+ -- Move Port <move-port@localhost>  Sun, 17 May 2026 00:00:00 +0000
+
 move-bringup (1.0.23-1) unstable; urgency=medium
 
   * move-swupdate-shim: after extracting an rnbo-move archive, rsync

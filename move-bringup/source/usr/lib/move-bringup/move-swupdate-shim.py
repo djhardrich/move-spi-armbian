@@ -174,9 +174,10 @@ async def _handle_control_client(
         except asyncio.IncompleteReadError:
             pass
         response = bytearray(IPC_MSG_SIZE)
-        struct.pack_into("<I", response, 4, 1)                # ACCEPT
-        struct.pack_into("<I", response, 8, _current_status)  # current status
-        struct.pack_into("<I", response, 12, _current_pct)    # current pct
+        struct.pack_into("<I", response, 0, IPC_MAGIC_CONTROL)  # magic
+        struct.pack_into("<I", response, 4, 1)                  # ACCEPT
+        pm = build_progress_msg(_current_status, cur_pct=_current_pct)
+        response[12:12 + len(pm)] = pm                          # embed progress_msg in data field
         writer.write(bytes(response))
         await writer.drain()
         writer.close()
@@ -223,6 +224,8 @@ async def _handle_control_client(
     def _progress_cb(pct: int, label: str = "installing") -> None:
         global _current_pct
         _current_pct = pct
+        msg = build_progress_msg(STATUS_RUN, cur_pct=pct, cur_image=label)
+        asyncio.run_coroutine_threadsafe(_notify_raw(msg), loop)
 
     result = await loop.run_in_executor(
         None, lambda: process_swu(tmp_path, _progress_cb)
