@@ -1,3 +1,17 @@
+move-bringup (1.0.15-1) unstable; urgency=medium
+
+  * move-swupdate-shim: fix encrypted payload detection — fall back to
+    .enc filename extension when sw-description encrypted flag is unset
+    (Ableton's libconfig uses a format our regex didn't match).
+  * move-swupdate-shim: skip postinstall scripts from .swu payloads;
+    Ableton's scripts expect A/B partition / U-Boot env not present on
+    Armbian — only the payload files themselves are installed.
+  * move-swupdate-shim: save sw-description to /tmp for diagnostics.
+  * Validated end-to-end with 2.0.5b1 firmware: decrypt → extract
+    core-library.tgz, mount ext4, rsync /opt/move/, success.
+
+ -- Move Port <move-port@localhost>  Sun, 17 May 2026 00:00:00 +0000
+
 move-bringup (1.0.14-1) unstable; urgency=medium
 
   * Replace swupdateprog-stub with move-swupdate-shim: full asyncio daemon

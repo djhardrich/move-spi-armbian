@@ -108,6 +108,9 @@ async def _handle_progress_client(
 
 IPC_HDR_FMT = "<IIi"   # magic, command, iLen
 IPC_HDR_LEN = struct.calcsize(IPC_HDR_FMT)  # 12
+# ipc_inst_start_ext() writes sizeof(struct ipc_message) = 3120 bytes and
+# then reads back exactly 3120 bytes, checking response[4] == 1 (ACCEPT).
+IPC_MSG_SIZE = 3120
 CMD_ACTIVATION = 0
 
 
@@ -127,13 +130,37 @@ async def _handle_control_client(
         return
 
     if command != CMD_ACTIVATION:
-        log.info("control: unsupported command %d, discarding", command)
-        if ilen > 0:
-            await reader.read(ilen)
+        # Other commands (e.g. ipc_get_status) use the same 3120-byte exchange.
+        # Drain the struct body and send back an idle-success response.
+        log.debug("control: command %d — draining and acking", command)
+        try:
+            await reader.readexactly(IPC_MSG_SIZE - IPC_HDR_LEN)
+        except asyncio.IncompleteReadError:
+            pass
+        response = bytearray(IPC_MSG_SIZE)
+        struct.pack_into("<I", response, 4, 1)
+        writer.write(bytes(response))
+        await writer.drain()
         writer.close()
         return
 
-    log.info("control: CMD_ACTIVATION received, streaming .swu ...")
+    log.info("control: CMD_ACTIVATION received, draining struct body ...")
+
+    # ipc_inst_start_ext() writes a fixed 3120-byte ipc_message struct then
+    # reads back exactly 3120 bytes and checks response[4] == 1 (ACCEPT).
+    # We must consume the remaining (3120 - 12) struct bytes and echo back
+    # the full 3120-byte response before the client starts streaming .swu.
+    remaining = IPC_MSG_SIZE - IPC_HDR_LEN
+    try:
+        await reader.readexactly(remaining)
+    except asyncio.IncompleteReadError:
+        log.warning("control: truncated ipc_message struct")
+
+    response = bytearray(IPC_MSG_SIZE)
+    struct.pack_into("<I", response, 4, 1)   # response[4] = 1 → ACCEPT
+    writer.write(bytes(response))
+    await writer.drain()
+    log.info("control: ACK sent (3120-byte response, offset4=1), reading .swu stream ...")
 
     # Stream payload to a temp file until EOF
     with tempfile.NamedTemporaryFile(
@@ -299,27 +326,14 @@ def _handle_raw_payload(entry: dict, workdir: str) -> str:
         log.error("raw payload filename escapes workdir: %s", filename)
         return "failure"
 
-    if entry["encrypted"]:
-        if not os.path.exists(KEY_FILE):
-            log.error("AES key file not found: %s", KEY_FILE)
-            return "failure"
-        with open(KEY_FILE) as kf:
-            key_text = kf.read().strip().split()
-        if len(key_text) < 2:
-            log.error("Bad key file format in %s", KEY_FILE)
-            return "failure"
-        key_hex, iv_hex = key_text[0], key_text[1]
-        dec = src + ".dec"
-        r = subprocess.run(
-            ["openssl", "enc", "-d", "-aes-256-cbc",
-             "-K", key_hex, "-iv", iv_hex, "-nosalt",
-             "-in", src, "-out", dec],
-            capture_output=True
-        )
-        if r.returncode != 0:
-            log.error("AES decrypt failed: %s", r.stderr.decode())
+    if entry["encrypted"] or filename.endswith(".enc"):
+        dec = src[:-4] if src.endswith(".enc") else src + ".dec"
+        err = _aes_decrypt(src, dec)
+        if err:
+            log.error("raw payload decrypt failed: %s", err)
             return "failure"
         src = dec
+        log.info("decrypted → %s", os.path.basename(src))
 
     if src.endswith(".gz"):
         base = src[:-3]
@@ -389,6 +403,26 @@ def _rsync_from_mount(mntdir: str) -> str:
     return result
 
 
+def _aes_decrypt(src: str, dst: str) -> "str | None":
+    """Decrypt src → dst with key from KEY_FILE. Returns error string or None."""
+    if not os.path.exists(KEY_FILE):
+        return f"AES key file not found: {KEY_FILE}"
+    with open(KEY_FILE) as kf:
+        parts = kf.read().strip().split()
+    if len(parts) < 2:
+        return f"bad key file format: {KEY_FILE}"
+    key_hex, iv_hex = parts[0], parts[1]
+    r = subprocess.run(
+        ["openssl", "enc", "-d", "-aes-256-cbc",
+         "-K", key_hex, "-iv", iv_hex, "-nosalt",
+         "-in", src, "-out", dst],
+        capture_output=True
+    )
+    if r.returncode != 0:
+        return f"openssl decrypt failed: {r.stderr.decode('utf-8', errors='replace').strip()}"
+    return None
+
+
 def _handle_archive_payload(entry: dict, workdir: str) -> str:
     filename = entry["filename"]
     src = _safe_workdir_path(workdir, filename)
@@ -406,14 +440,22 @@ def _handle_archive_payload(entry: dict, workdir: str) -> str:
     if entry["create_destination"]:
         os.makedirs(dest, exist_ok=True)
 
-    log.info("extracting %s → %s", filename, dest)
+    if entry["encrypted"] or filename.endswith(".enc"):
+        dec = src[:-4] if src.endswith(".enc") else src + ".dec"
+        err = _aes_decrypt(src, dec)
+        if err:
+            log.error("archive decrypt failed: %s", err)
+            return "failure"
+        src = dec
+        log.info("decrypted → %s", os.path.basename(src))
+
+    log.info("extracting %s → %s", os.path.basename(src), dest)
     r = subprocess.run(
-        ["tar", "-xzf", src, "-C", dest,
-         "--warning=no-unknown-keyword"],
+        ["tar", "-xzf", src, "-C", dest],
         capture_output=True
     )
     if r.returncode != 0:
-        log.error("tar extract failed: %s", r.stderr.decode())
+        log.error("tar extract failed: %s", r.stderr.decode('utf-8', errors='replace'))
         return "failure"
 
     subprocess.run(["chown", "-R", "ableton:users", dest], capture_output=True)
@@ -442,7 +484,14 @@ def _process_swu_inner(path: str, workdir: str) -> str:
             stdin=f, capture_output=True, cwd=workdir
         )
     if r.returncode != 0:
-        log.error("cpio extract failed: %s", r.stderr.decode())
+        log.error("cpio extract failed: %s", r.stderr.decode().strip())
+        with open(path, "rb") as _dbg:
+            _hdr = _dbg.read(128)
+        log.error("cpio fail — first 128 bytes hex: %s", _hdr.hex())
+        log.error("cpio fail — printable: %s", _hdr.decode("latin-1", errors="replace").replace("\n", "\\n")[:200])
+        import shutil as _sh
+        _sh.copy2(path, "/tmp/move-swu-failed-last.swu")
+        log.error("cpio fail — payload saved to /tmp/move-swu-failed-last.swu")
         return "failure"
 
     sw_desc_path = os.path.join(workdir, "sw-description")
@@ -467,6 +516,11 @@ def _process_swu_inner(path: str, workdir: str) -> str:
     # 3. Parse sw-description
     with open(sw_desc_path) as f:
         sw_desc_text = f.read()
+    try:
+        with open("/tmp/move-sw-description-last.txt", "w") as _f:
+            _f.write(sw_desc_text)
+    except Exception:
+        pass
     desc = _parse_sw_description(sw_desc_text)
     log.info("sw-description version=%s, %d file(s), %d script(s)",
              desc["version"], len(desc["files"]), len(desc["scripts"]))
@@ -505,24 +559,11 @@ def _process_swu_inner(path: str, workdir: str) -> str:
         if r2 != "success":
             result = r2
 
-    # 6. Run scripts
+    # 6. Scripts: Ableton's postinstall scripts expect swupdate's A/B partition
+    # environment (U-Boot env vars, specific mount layout). Skip execution on
+    # Armbian — the payload files themselves are what matters.
     for s in desc["scripts"]:
-        sname = s["filename"]
-        spath = _safe_workdir_path(workdir, sname)
-        if spath is None:
-            log.warning("script filename escapes workdir: %s — skipping", sname)
-            continue
-        if not os.path.exists(spath):
-            log.warning("script not found: %s", sname)
-            continue
-        os.chmod(spath, 0o755)
-        log.info("running script: %s", sname)
-        r3 = subprocess.run(["bash", spath], capture_output=True)
-        if r3.returncode != 0:
-            log.warning("script %s exited %d: %s",
-                        sname, r3.returncode, r3.stderr.decode())
-        else:
-            log.info("script %s: OK", sname)
+        log.info("skipping script %s (not applicable on Armbian)", s["filename"])
 
     # 7. Restart launcher
     if result == "success":
