@@ -118,6 +118,9 @@ apt-get install -y --no-install-recommends rpi-eeprom || \
 apt-get install -y --no-install-recommends libraspberrypi-bin || \
     echo "customize-image.sh: WARNING: libraspberrypi-bin unavailable; see BUILD.md §4c for manual install"
 
+echo "customize-image.sh: installing mesa-vulkan-drivers"
+apt-get install -y --no-install-recommends mesa-vulkan-drivers
+
 # ── 2. DT overlays now ship inside the move-bringup .deb ─────────────
 # The .deb's postinst builds them from /usr/share/move-bringup/overlays-src/
 # and installs them to /boot/firmware/overlays/, plus an
