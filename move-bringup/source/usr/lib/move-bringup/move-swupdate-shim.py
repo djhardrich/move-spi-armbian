@@ -176,8 +176,8 @@ async def _handle_control_client(
         response = bytearray(IPC_MSG_SIZE)
         struct.pack_into("<I", response, 0, IPC_MAGIC_CONTROL)  # magic
         struct.pack_into("<I", response, 4, 1)                  # ACCEPT
-        pm = build_progress_msg(_current_status, cur_pct=_current_pct)
-        response[12:12 + len(pm)] = pm                          # embed progress_msg in data field
+        struct.pack_into("<I", response, 12, _current_status)   # data[0] = SWUPDATE_STATUS
+        struct.pack_into("<I", response, 16, _current_pct)      # data[4] = current pct
         writer.write(bytes(response))
         await writer.drain()
         writer.close()
@@ -200,6 +200,8 @@ async def _handle_control_client(
     writer.write(bytes(response))
     await writer.drain()
     log.info("control: ACK sent (3120-byte response, offset4=1), reading .swu stream ...")
+    _current_status = STATUS_RUN
+    _current_pct    = 0
 
     # Stream payload to a temp file until EOF
     with tempfile.NamedTemporaryFile(

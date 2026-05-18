@@ -6,13 +6,17 @@ move-bringup (1.0.24-1) unstable; urgency=medium
     MoveLauncher in standalone-launch scenarios.
   * move-swupdate-shim: restore asyncio.run_coroutine_threadsafe push in
     _progress_cb alongside the poll loop so on-Move display receives live
-    progress updates during install; 1.0.22 poll-only approach did not push
+    progress updates during install; 1.0.23 poll-only approach did not push
     to MoveLauncher's progress socket connection, leaving the display stuck
     at 0% throughout the update.
-  * move-swupdate-shim: embed a full progress_msg in ipc_get_status
-    (command != CMD_ACTIVATION) responses on the control socket so any
-    client reading the on-wire progress_msg struct gets correct magic,
-    status, and percentage.
+  * move-swupdate-shim: set STATUS_RUN immediately on CMD_ACTIVATION ACK
+    (before SWU streaming begins) so progress socket clients that connect
+    during the download phase stay connected and receive install-phase pushes.
+  * move-swupdate-shim: fix ipc_get_status (command != CMD_ACTIVATION)
+    response to write SWUPDATE_STATUS at data[0] (offset 12) and pct at
+    data[4]; embedding a progress_msg there put IPC_MAGIC_PROGRESS at
+    offset 12 which MoveWebService read as an invalid state, causing a
+    spurious 400 on SWU uploads that otherwise succeeded.
 
  -- Move Port <move-port@localhost>  Sun, 17 May 2026 00:00:00 +0000
 
