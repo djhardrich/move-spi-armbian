@@ -202,6 +202,14 @@ Once the new image boots:
    continues to climb. If it's frozen, the GPIO mapping / pin routing
    on the carrier differs from the CM4 layout.
    
+## Troubleshooting
+
+- **Move Manager: "No options. Unable to stat path ..." on Recordings / Samples /
+  Presets.** Caused by `/opt/move/MoveWebService` hardcoding the stock data partition
+  (`/dev/mmcblk0p4`) for a quota lookup that doesn't exist on this single-partition build.
+  Fix: `sudo scripts/fix-move-manager-quota.sh` (or `--host root@move.local`). See
+  [docs/MOVE_MANAGER_QUOTA_FIX.md](docs/MOVE_MANAGER_QUOTA_FIX.md).
+
 ## AI Assistance Disclaimer
 This was developed with AI assistance, including Claude, Codex, and other AI assistants.
 
